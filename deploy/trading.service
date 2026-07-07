@@ -1,0 +1,17 @@
+[Unit]
+Description=Autonomous Trading System (FastAPI dashboard)
+After=network.target
+
+[Service]
+Type=simple
+User=trading
+WorkingDirectory=/home/trading/autonomous-trading-system
+# Bind to localhost only -- nginx handles the public HTTPS side.
+ExecStart=/home/trading/autonomous-trading-system/.venv/bin/python -m src.main serve --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+# Give scans room without OOM-killing on a small droplet.
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

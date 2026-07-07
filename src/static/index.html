@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Autonomous Trading System</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <h1>Autonomous Trading System</h1>
+    <nav class="topnav">
+      <a href="#regime-card">Overview</a>
+      <a href="#sector-heatmap">Sectors</a>
+      <a href="#proposals-content">Proposals</a>
+      <a href="#track-record">Track Record</a>
+      <a href="#trades-content">Trades</a>
+    </nav>
+    <button id="scan-btn">Run Scan</button>
+    <span id="scan-status"></span>
+  </header>
+
+  <section class="grid-top">
+    <div class="card" id="regime-card">
+      <h2>Market Regime</h2>
+      <div id="regime-content">Loading...</div>
+    </div>
+    <div class="card" id="accounts-card">
+      <h2>Accounts</h2>
+      <div id="accounts-content">Loading...</div>
+    </div>
+    <div class="card" id="performance-card">
+      <h2>Performance</h2>
+      <div id="performance-content">Loading...</div>
+    </div>
+  </section>
+
+  <section class="card" id="watchlist-card">
+    <h2>Catalyst Watchlist <span class="hint">(your story/contract hunches — scanned for the breakout footprint every scan)</span></h2>
+    <div class="watch-add">
+      <input id="watch-symbol" placeholder="Ticker (e.g. PLTR)" maxlength="8" />
+      <input id="watch-note" placeholder="Why? (e.g. new gov contract, unique AI platform)" />
+      <button id="watch-add-btn">Add</button>
+    </div>
+    <div id="watchlist-content">Loading...</div>
+  </section>
+
+  <section class="card">
+    <h2>Sector Heat Map <span class="hint">(click any ETF for its top setups; ↗ = laggard turning up)</span></h2>
+    <div id="sector-heatmap" class="heatmap">Loading...</div>
+    <div id="sector-setups"></div>
+  </section>
+
+  <section class="card">
+    <h2>Trade Proposals <span class="hint">(review and approve manually -- nothing executes automatically)</span></h2>
+    <div class="tabs">
+      <button class="tab active" data-view="top">Top Picks</button>
+      <button class="tab" data-view="shortterm">⚡ Short-term 5-10%</button>
+      <button class="tab" data-view="coiling">🌀 Coiling (pre-breakout)</button>
+      <button class="tab" data-view="downside">🔻 Downside (short)</button>
+      <button class="tab" data-view="sectorSM">Sector: Short + Medium</button>
+      <button class="tab" data-view="sector">By Sector</button>
+      <button class="tab" data-view="timeframe">By Timeframe</button>
+    </div>
+    <div id="proposals-content">Loading...</div>
+  </section>
+
+  <section class="card" id="track-record">
+    <h2>Track Record <span class="hint">(auto-simulated: every proposal is paper-traded and scored against real prices)</span></h2>
+    <div id="track-record-content">Loading...</div>
+  </section>
+
+  <section class="card">
+    <h2>Open Trades &amp; Positions</h2>
+    <h3>Simulated open trades — by sector <span class="hint">(auto-tracked from each scan; tagged with the day it was given)</span></h3>
+    <div id="paper-open-content">Loading...</div>
+    <h3 style="margin-top:18px">Approved / executed positions</h3>
+    <div id="trades-content">Loading...</div>
+  </section>
+
+  <script src="/app.js"></script>
+</body>
+</html>

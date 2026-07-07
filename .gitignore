@@ -1,0 +1,29 @@
+# ---- Python ----
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# ---- SECRETS (never commit real credentials) ----
+.env
+config/config.json
+config/*.local.json
+*.pem
+*.key
+
+# ---- runtime data (DB = paper-trade history; keep local/on-server only) ----
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+
+# ---- logs (may echo runtime detail; never commit) ----
+logs/
+*.log
+
+# ---- platform binaries / dev artifacts (not part of the app) ----
+cloudflared.exe
+*.exe
+*.pickle
+.claude/launch.json

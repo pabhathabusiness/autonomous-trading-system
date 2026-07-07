@@ -1,0 +1,10 @@
+fastapi>=0.115
+uvicorn[standard]>=0.34
+requests>=2.31
+pydantic>=2.10
+yfinance>=0.2.51
+pandas>=2.2
+numpy>=1.26
+robin_stocks>=3.4
+pyotp>=2.9
+python-dotenv>=1.0

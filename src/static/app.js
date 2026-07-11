@@ -80,7 +80,7 @@ async function loadSectors() {
       fetchJSON("/api/turning-sectors").catch(() => []),
     ]);
     if (!sectors.length) {
-      el.innerHTML = '<p class="muted">No sector data yet -- run a scan</p>';
+      el.innerHTML = '<p class="muted">No sector data yet — the engine populates this on its next scan.</p>';
       return;
     }
     const turnSet = new Set(turning);
@@ -251,7 +251,7 @@ function renderProposals() {
   const el = $("proposals-content");
   const proposals = proposalCache;
   if (!proposals.length) {
-    el.innerHTML = '<p class="muted">No pending proposals -- run a scan</p>';
+    el.innerHTML = '<p class="muted">No pending proposals — the engine posts new ideas automatically each scan.</p>';
     return;
   }
 
@@ -271,7 +271,7 @@ function renderProposals() {
     el.innerHTML = `<h3>⚡ Short-term momentum — 5-10% in 1-2 days
       <span class="muted">(${st.length} ideas across sectors)</span></h3>` +
       (st.length ? proposalTable(st)
-        : '<p class="muted">No short-term momentum ideas cleared the filters this scan — run a scan, or there are no clean setups right now.</p>');
+        : '<p class="muted">No short-term momentum ideas cleared the filters this scan — no clean setups right now.</p>');
   } else if (proposalView === "coiling") {
     // names coiling before a potential breakout (squeeze + accumulation)
     const co = rankProposals(proposals.filter(p => p.strategy === "coiling"));
@@ -390,7 +390,7 @@ async function loadLive() {
     const d = await fetchJSON("/api/live");
     const trades = d.trades || [];
     if (!trades.length) {
-      el.innerHTML = '<p class="muted">No open simulated trades yet — run a scan.</p>';
+      el.innerHTML = '<p class="muted">No open trades yet — the engine opens them automatically as setups qualify.</p>';
       return;
     }
     const maxAge = Math.max(...trades.map(t => t.age_seconds ?? 0));
@@ -428,60 +428,6 @@ async function loadLive() {
       }).join("");
   } catch (e) {
     el.innerHTML = `<p class="muted">${e.message}</p>`;
-  }
-}
-
-async function loadWatchlist() {
-  const el = $("watchlist-content");
-  try {
-    const [watch, proposals] = await Promise.all([
-      fetchJSON("/api/watchlist"),
-      fetchJSON("/api/proposals?status=pending"),
-    ]);
-    if (!watch.length) {
-      el.innerHTML = '<p class="muted">No names yet. Add tickers you believe have a catalyst — the system watches them for the squeeze + accumulation breakout footprint.</p>';
-      return;
-    }
-    const coilBySym = {};
-    for (const p of proposals) if (p.strategy === "coiling") coilBySym[p.symbol] = p;
-    el.innerHTML = `<table><thead><tr><th>Ticker</th><th>Your note</th><th>Status</th><th></th></tr></thead><tbody>` +
-      watch.map(w => {
-        const c = coilBySym[w.symbol];
-        const status = c
-          ? `<span class="conf conf-${c.confidence}">🌀 COILING ${num(c.quality_score, 1)}/10</span> <span class="muted">trigger ${price(c.entry_price)}</span>`
-          : '<span class="muted">watching…</span>';
-        return `<tr>
-          <td><strong>${w.symbol}</strong></td>
-          <td class="muted">${w.note || ""}</td>
-          <td>${status}</td>
-          <td><button class="reject" style="padding:2px 8px" onclick="removeWatch('${w.symbol}')">✕</button></td>
-        </tr>`;
-      }).join("") + "</tbody></table>";
-  } catch (e) {
-    el.innerHTML = `<p class="muted">${e.message}</p>`;
-  }
-}
-
-async function addWatch() {
-  const sym = $("watch-symbol").value.trim().toUpperCase();
-  const note = $("watch-note").value.trim();
-  if (!sym) return;
-  try {
-    await fetchJSON(`/api/watchlist?symbol=${encodeURIComponent(sym)}&note=${encodeURIComponent(note)}`, { method: "POST" });
-    $("watch-symbol").value = "";
-    $("watch-note").value = "";
-    await loadWatchlist();
-  } catch (e) {
-    alert(`Could not add ${sym}: ${e.message}`);
-  }
-}
-
-async function removeWatch(sym) {
-  try {
-    await fetchJSON(`/api/watchlist/${encodeURIComponent(sym)}`, { method: "DELETE" });
-    await loadWatchlist();
-  } catch (e) {
-    alert(`Could not remove ${sym}: ${e.message}`);
   }
 }
 
@@ -549,26 +495,220 @@ async function loadTrackRecord() {
 
 async function loadAll() {
   await Promise.all([loadRegime(), loadAccounts(), loadPerformance(), loadSectors(),
-    loadWatchlist(), loadProposals(), loadTrackRecord(), loadLive(), loadTrades()]);
+    loadProposals(), loadTrackRecord(), loadLive(), loadTrades()]);
 }
 
-$("scan-btn").addEventListener("click", async () => {
-  const status = $("scan-status");
-  status.textContent = "Scanning...";
-  $("scan-btn").disabled = true;
+// The autonomous engine replaces the old manual "Run Scan": show its status.
+async function loadEngineStatus() {
+  const el = $("engine-status");
+  if (!el) return;
   try {
-    const result = await fetchJSON("/api/scan", { method: "POST" });
-    status.textContent = `Scan complete: ${JSON.stringify(result.proposals)}`;
-    await loadAll();
+    const s = await fetchJSON("/api/scheduler");
+    el.classList.toggle("engine-live", !!s.running);
+    el.classList.toggle("engine-off", !s.running);
+    el.title = `Autonomous engine ${s.running ? "running" : "stopped"} · ` +
+      `market ${s.market_open ? "open" : "closed"} · auto-execute ${s.auto_execute ? "ON" : "off (paper-safe)"}`;
+    el.textContent = s.running
+      ? (s.market_open ? "● Autonomous · scanning" : "● Autonomous · monitoring")
+      : "○ Engine stopped";
   } catch (e) {
-    status.textContent = `Scan failed: ${e.message}`;
-  } finally {
-    $("scan-btn").disabled = false;
+    el.textContent = "○ Engine status n/a";
   }
-});
+}
 
-$("watch-add-btn").addEventListener("click", addWatch);
-$("watch-symbol").addEventListener("keydown", e => { if (e.key === "Enter") addWatch(); });
+// ==================== Robinhood-style live dashboard ====================
+const biasClass = (b) => b === "Bullish" ? "biastag-bull" : b === "Bearish" ? "biastag-bear" : "biastag-neut";
+const gradeClass = (g) => (g && "ABCDF".includes(g)) ? "g-" + g : "g-U";
+const gradeText = (g) => g === "UNGRADED" ? "UG" : (g || "—");
+const gradeRank = (g) => ({ A: 5, B: 4, C: 3, D: 2, F: 1 }[g] || 0);
+const archLabel = (a) => ({ trending_pullback_to_pivot: "Pullback", reversal: "Reversal", breakout_continuation: "Breakout" }[a] || (a || "—"));
+const bandLabel = (b) => ({ "1-2 day": "1–2 Day", "1-2 week swing": "Swing", "intraday": "Intraday" }[b] || (b || ""));
+
+let biasData = {};       // symbol -> bias-strip entry
+let liveIndex = {};      // symbol -> /api/live trade
+let algoIndex = {};      // trade id -> /api/log/algo trade
+
+async function refreshLiveIndex() {
+  try {
+    const d = await fetchJSON("/api/live");
+    liveIndex = {};
+    (d.trades || []).forEach(t => liveIndex[t.symbol] = t);
+  } catch (e) { /* keep last */ }
+}
+
+async function loadBiasStrip() {
+  const el = $("bias-strip"); if (!el) return;
+  try {
+    const d = await fetchJSON("/api/bias-strip");
+    biasData = {};
+    d.symbols.forEach(s => biasData[s.symbol] = s);
+    el.innerHTML = d.symbols.map(m => `
+      <div class="biascard ${m.symbol === 'SPY' ? 'spy' : ''}" onclick="openBias('${m.symbol}')">
+        <div class="bc-top"><span class="bc-tk">${m.symbol}</span>
+          <span class="biastag ${biasClass(m.bias)}">${m.bias}</span></div>
+        <div class="bc-price">${price(m.price)}</div>
+        <div class="bc-chg ${(m.session_pct ?? 0) >= 0 ? 'pos' : 'neg'}">${m.session_pct != null ? pct(m.session_pct, 2) : '—'} ${ageLabel(m.age_seconds)}</div>
+        <div class="bc-lvls"><span class="lvl-up">above <b>${m.level_above != null ? num(m.level_above, 2) : '—'}</b></span>
+          <span class="lvl-dn">watch <b>${m.level_below != null ? num(m.level_below, 2) : '—'}</b></span></div>
+      </div>`).join("");
+  } catch (e) { el.innerHTML = `<p class="muted">${e.message}</p>`; }
+}
+
+async function loadSectorBoard() {
+  try {
+    const [sectors, turning] = await Promise.all([
+      fetchJSON("/api/sectors"), fetchJSON("/api/turning-sectors").catch(() => [])]);
+    if (!sectors.length) { $("board-strong").innerHTML = '<p class="muted">No sector data yet.</p>'; return; }
+    const sorted = [...sectors].sort((a, b) => (b.composite_score || 0) - (a.composite_score || 0));
+    const turnSet = new Set(turning);
+    const row = (s, tone) => {
+      const up = (s.perf_1d || 0) >= 0;
+      const lean = tone === 'nu' ? ` <span class="lean ${up ? 'lean-up' : 'lean-dn'}">${up ? '↑' : '↓'} leaning ${up ? 'up' : 'down'}</span>` : "";
+      return `<div class="srow"><span class="sname">${s.sector_name}${lean}</span>
+        <span class="sval ${tone === 'up' ? 'pos' : tone === 'dn' ? 'neg' : 'nu'}">${signed(s.composite_score)}</span></div>`;
+    };
+    $("board-strong").innerHTML = sorted.slice(0, 5).map(s => row(s, 'up')).join("");
+    $("board-weak").innerHTML = sorted.slice(-3).reverse().map(s => row(s, 'dn')).join("");
+    const watch = sorted.filter(s => turnSet.has(s.sector_name)).slice(0, 3);
+    $("board-watch").innerHTML = watch.length ? watch.map(s => row(s, 'nu')).join("")
+      : '<p class="muted">none turning right now</p>';
+  } catch (e) { $("board-strong").innerHTML = `<p class="muted">${e.message}</p>`; }
+}
+
+function ideaRow(t) {
+  const live = liveIndex[t.symbol];
+  const lp = live ? live.live_price : null, pnl = live ? live.live_pnl_pct : null;
+  const sub = lp != null ? `live ${price(lp)}${pnl != null ? ' · ' + pct(pnl, 1) : ''}`
+    : (t.edges_fired || "").split(", ").slice(0, 3).join(" · ");
+  return `<div class="idea" onclick="openTrade(${t.id})">
+    <span class="i-tk">${t.symbol}${t.direction === 'short' ? ' <span class="short-tag">▼</span>' : ''}</span>
+    <div class="i-mid"><div class="i-chips">
+        <span class="chip chip-arch">${archLabel(t.archetype)}</span>
+        <span class="chip chip-tf">${bandLabel(t.timeframe_band)}</span>
+        <span class="chip chip-strat">${t.strategy}</span></div>
+      <span class="i-sub muted">${sub}</span></div>
+    <div class="i-rr"><div class="v">${num(t.planned_rr || t.risk_reward, 1)}:1</div><div class="l">R:R</div></div>
+    <div class="grade ${gradeClass(t.process_grade)}" title="${t.process_grade || ''} — ${t.process_notes || ''}">${gradeText(t.process_grade)}</div>
+  </div>`;
+}
+
+function renderIdeasFeed(d) {
+  const el = $("ideas-feed"); if (!el) return;
+  const open = (d.trades || []).filter(t => t.status === 'open')
+    .sort((a, b) => gradeRank(b.process_grade) - gradeRank(a.process_grade) || (b.planned_rr || 0) - (a.planned_rr || 0));
+  el.innerHTML = open.length ? open.map(ideaRow).join("")
+    : '<p class="muted">No open algo trades yet — the engine opens them as setups qualify.</p>';
+}
+
+function renderJournal(d) {
+  const el = $("journal-algo"); if (!el) return;
+  const sm = $("journal-summary");
+  if (sm) sm.textContent = `${d.count} trades · ${d.graded} graded · ${d.ungraded} ungraded`;
+  const trades = d.trades || [];
+  if (!trades.length) { el.innerHTML = '<p class="muted">No algo trades yet.</p>'; return; }
+  el.innerHTML = `<table class="journal"><thead><tr>
+      <th>Grade</th><th>Symbol</th><th>Setup</th><th>Band</th><th>Plan (entry→stop/target)</th>
+      <th>R:R</th><th>Status</th><th>Live / Result</th><th class="muted">P&L</th></tr></thead><tbody>` +
+    trades.map(t => {
+      const live = liveIndex[t.symbol], isOpen = t.status === 'open';
+      const result = isOpen
+        ? (live ? `${price(live.live_price)} ${ageLabel(live.age_seconds)} <span class="${(live.live_pnl_pct ?? 0) >= 0 ? 'pos' : 'neg'}">${pct(live.live_pnl_pct, 1)}</span>` : '<span class="muted">—</span>')
+        : `<span class="${t.outcome === 'win' ? 'pos' : 'neg'}">${(t.outcome || '').toUpperCase()}</span> ${t.r_multiple != null ? '· ' + signed(t.r_multiple, 2) + 'R' : ''}`;
+      return `<tr class="jrow" onclick="openTrade(${t.id})">
+        <td><span class="grade sm ${gradeClass(t.process_grade)}" title="${t.process_grade || ''}">${gradeText(t.process_grade)}</span></td>
+        <td><strong>${t.symbol}</strong>${t.direction === 'short' ? ' <span class="short-tag">▼</span>' : ''}</td>
+        <td>${archLabel(t.archetype)}</td>
+        <td class="muted">${bandLabel(t.timeframe_band)}</td>
+        <td class="muted">${price(t.entry_price)}→${price(t.stop_loss)}/${price(t.target_price)}</td>
+        <td>${num(t.planned_rr || t.risk_reward, 1)}:1</td>
+        <td>${isOpen ? '<span class="pos">open</span>' : 'closed'}</td>
+        <td>${result}</td>
+        <td class="muted pnlcol">${t.pnl_usd != null ? money(t.pnl_usd) : ''}</td>
+      </tr>`;
+    }).join("") + "</tbody></table>";
+}
+
+async function loadAlgo() {
+  try {
+    await refreshLiveIndex();
+    const d = await fetchJSON("/api/log/algo");
+    algoIndex = {};
+    (d.trades || []).forEach(t => algoIndex[t.id] = t);
+    renderIdeasFeed(d);
+    renderJournal(d);
+  } catch (e) {
+    const el = $("ideas-feed"); if (el) el.innerHTML = `<p class="muted">${e.message}</p>`;
+  }
+}
+
+// ---- detail sheet ----
+function showSheet() { $("detail-overlay").classList.add("open"); $("detail-sheet").classList.add("open"); }
+function closeDetail() { $("detail-overlay").classList.remove("open"); $("detail-sheet").classList.remove("open"); }
+
+function openBias(sym) {
+  const m = biasData[sym]; if (!m) return;
+  $("d-ticker").textContent = sym;
+  $("d-price").textContent = price(m.price);
+  const tag = $("d-tag"); tag.textContent = m.bias; tag.className = "biastag " + biasClass(m.bias);
+  $("detail-body").innerHTML = `
+    <div class="d-kv">
+      <div class="cell"><div class="l">Stance</div><div class="v ${m.bias === 'Bullish' ? 'pos' : m.bias === 'Bearish' ? 'neg' : ''}">${m.bias} — conditional</div></div>
+      <div class="cell"><div class="l">Session</div><div class="v ${(m.session_pct ?? 0) >= 0 ? 'pos' : 'neg'}">${m.session_pct != null ? pct(m.session_pct, 2) : '—'}</div></div>
+      <div class="cell"><div class="l">Key level above ▲</div><div class="v">${m.level_above != null ? num(m.level_above, 2) : '—'}</div></div>
+      <div class="cell"><div class="l">Key level below ▼</div><div class="v">${m.level_below != null ? num(m.level_below, 2) : '—'}</div></div>
+    </div>
+    <p class="muted" style="margin-top:14px">Conditional, not a forecast: constructive while it holds the lower level, cautious if it loses it.</p>`;
+  showSheet();
+}
+
+function openTrade(id) {
+  const t = algoIndex[id]; if (!t) return;
+  const live = liveIndex[t.symbol];
+  $("d-ticker").textContent = t.symbol + (t.direction === 'short' ? ' ▼' : '');
+  $("d-price").textContent = live ? price(live.live_price) : price(t.entry_price);
+  const tag = $("d-tag"); tag.textContent = (t.process_grade || '—') + " grade";
+  tag.className = "biastag " + (gradeClass(t.process_grade) === 'g-U' ? 'biastag-neut' : 'biastag-bull');
+  let flags = []; try { flags = JSON.parse(t.process_flags || "[]"); } catch (e) { }
+  $("detail-body").innerHTML = `
+    <div class="plan3">
+      <div class="p p-e"><div class="l">Entry</div><div class="v">${price(t.entry_price)}</div></div>
+      <div class="p p-s"><div class="l">Stop</div><div class="v">${price(t.stop_loss)}</div></div>
+      <div class="p p-t"><div class="l">Target</div><div class="v">${price(t.target_price)}</div></div>
+    </div>
+    <div class="d-kv" style="margin-top:12px">
+      <div class="cell"><div class="l">Archetype</div><div class="v">${archLabel(t.archetype)}</div></div>
+      <div class="cell"><div class="l">Timeframe band</div><div class="v">${bandLabel(t.timeframe_band)}</div></div>
+      <div class="cell"><div class="l">R:R</div><div class="v">${num(t.planned_rr || t.risk_reward, 1)}:1</div></div>
+      <div class="cell"><div class="l">RS vs SPY</div><div class="v ${(t.rs_vs_spy ?? 0) >= 0 ? 'pos' : 'neg'}">${t.rs_vs_spy != null ? pct(t.rs_vs_spy, 1) : '—'}</div></div>
+      <div class="cell"><div class="l">Process grade</div><div class="v">${t.process_grade || '—'} ${t.process_score != null ? '(' + t.process_score + ')' : ''}</div></div>
+      <div class="cell"><div class="l">Status</div><div class="v">${t.status}${t.outcome ? ' · ' + t.outcome : ''}${t.r_multiple != null ? ' · ' + signed(t.r_multiple, 2) + 'R' : ''}</div></div>
+    </div>
+    <div class="d-block"><h4>Process notes</h4><p class="muted">${t.process_notes || '—'}</p>
+      <div class="flagwrap">${flags.map(f => `<span class="flag">${f}</span>`).join("")}</div></div>
+    <div class="d-block"><h4>Confluences</h4><p class="muted">${(t.edges_fired || '—').split(", ").join(" · ")}</p></div>
+    ${live ? `<div class="d-block"><h4>Live</h4><p>${price(live.live_price)} ${ageLabel(live.age_seconds)} ·
+      <span class="${(live.live_pnl_pct ?? 0) >= 0 ? 'pos' : 'neg'}">${pct(live.live_pnl_pct, 1)}</span> ·
+      to stop ${pct(live.dist_to_stop_pct, 1)} / to target ${pct(live.dist_to_target_pct, 1)}</p></div>` : ''}`;
+  showSheet();
+}
+
+// ---- view switching ----
+function currentView() {
+  const el = document.querySelector(".navtab.active");
+  return el ? el.dataset.view : "dashboard";
+}
+function switchView(v) {
+  document.querySelectorAll(".navtab").forEach(t => t.classList.toggle("active", t.dataset.view === v));
+  document.querySelectorAll(".view").forEach(s => s.classList.toggle("active", s.id === "view-" + v));
+  if (v === "dashboard") { loadBiasStrip(); loadSectorBoard(); loadAlgo(); }
+  else if (v === "journal") { loadAlgo(); }
+  else if (v === "sectors") { loadSectors(); }
+  else if (v === "more") { loadAll(); }
+}
+document.querySelectorAll(".navtab").forEach(tab => tab.addEventListener("click", () => switchView(tab.dataset.view)));
+$("detail-close").addEventListener("click", closeDetail);
+$("detail-overlay").addEventListener("click", closeDetail);
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeDetail(); });
 
 document.querySelectorAll(".tab").forEach(tab => {
   tab.addEventListener("click", () => {
@@ -579,7 +719,21 @@ document.querySelectorAll(".tab").forEach(tab => {
   });
 });
 
+// initial paint: dashboard (default view) + engine status, and the detailed
+// "More" panels in the background so switching to them is instant.
+loadBiasStrip();
+loadSectorBoard();
+loadAlgo();
+loadEngineStatus();
 loadAll();
-setInterval(loadAll, 30000);
-// live paper-trade book refreshes every 5s (no full page reload)
-setInterval(loadLive, 5000);
+
+// Live refresh, no page reload: the active live view every ~6s, engine status
+// every 15s, the detailed panels every 30s.
+setInterval(() => {
+  const v = currentView();
+  if (v === "dashboard") { loadBiasStrip(); loadSectorBoard(); loadAlgo(); }
+  else if (v === "journal") { loadAlgo(); }
+}, 6000);
+setInterval(loadEngineStatus, 15000);
+setInterval(() => { if (currentView() === "more") { loadLive(); } }, 5000);
+setInterval(() => { if (currentView() === "more") { loadAll(); } }, 30000);

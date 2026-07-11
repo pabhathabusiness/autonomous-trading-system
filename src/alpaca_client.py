@@ -23,6 +23,8 @@ from typing import Any, Optional
 import pandas as pd
 import requests
 
+from src import execution_guard
+
 logger = logging.getLogger(__name__)
 
 # Alpaca REST timeframe tokens
@@ -59,11 +61,14 @@ def _age_seconds(ts: Optional[datetime]) -> Optional[float]:
 
 class AlpacaClient:
     def __init__(self, config: dict[str, Any]):
+        self._config = config
         cfg = config.get("alpaca", {})
         self.key = cfg.get("alpaca_key", "")
         self.secret = cfg.get("alpaca_secret", "")
         self.data_url = cfg.get("data_url", "https://data.alpaca.markets").rstrip("/")
         self.paper_url = cfg.get("paper_url", "https://paper-api.alpaca.markets").rstrip("/")
+        # Hard paper-only default: order placement is walled to the paper host.
+        self.paper_only = bool(cfg.get("paper_only", True))
         self.feed = cfg.get("feed", "iex")
         self.enabled = bool(cfg.get("enabled") and self.key and self.secret
                             and not self.key.startswith("YOUR_"))
@@ -157,3 +162,57 @@ class AlpacaClient:
         if not self.enabled:
             return None
         return self._get(f"{self.paper_url}/v2/account", {})
+
+    def positions(self) -> list[dict[str, Any]]:
+        """Open positions on the paper account (read-only)."""
+        if not self.enabled:
+            return []
+        data = self._get(f"{self.paper_url}/v2/positions", {})
+        return data if isinstance(data, list) else []
+
+    # ----------------------------------------------------------- order placement
+    def _post(self, url: str, body: dict[str, Any]) -> Optional[dict[str, Any]]:
+        try:
+            r = self._session.post(url, json=body, timeout=10)
+            if r.status_code not in (200, 201):
+                logger.warning("Alpaca POST %s -> %s: %s", url, r.status_code, r.text[:200])
+                return {"error": r.text[:200], "status_code": r.status_code}
+            return r.json()
+        except requests.RequestException as exc:
+            logger.warning("Alpaca POST failed: %s", exc)
+            return {"error": str(exc)}
+
+    def submit_bracket_order(self, *, symbol: str, qty: int, side: str,
+                             entry_price: float, stop_price: float, target_price: float,
+                             account_type: str, time_in_force: str = "day",
+                             order_type: str = "limit") -> dict[str, Any]:
+        """Submit a broker-managed BRACKET order (entry + attached stop-loss +
+        take-profit) on the Alpaca PAPER account. Alpaca manages the exits
+        server-side, so a position closes at its level even if our monitor loop
+        hiccups.
+
+        THE WALL: every call first passes `execution_guard.assert_paper_execution`,
+        which fails closed unless the account is a paper book AND the endpoint is
+        the Alpaca paper host. A real-money account can never reach order
+        submission through this method.
+        """
+        # ---- paper-vs-real wall (raises RealMoneyGuardError => no order) ----
+        execution_guard.assert_paper_execution(
+            account_type=account_type, endpoint_url=self.paper_url, config=self._config)
+
+        if not self.enabled:
+            return {"status": "disabled", "reason": "alpaca not enabled (no keys)"}
+
+        body: dict[str, Any] = {
+            "symbol": symbol,
+            "qty": str(int(qty)),
+            "side": side,                       # 'buy' (long) / 'sell' (short)
+            "type": order_type,                 # 'limit' entry by default
+            "time_in_force": time_in_force,
+            "order_class": "bracket",
+            "take_profit": {"limit_price": round(float(target_price), 2)},
+            "stop_loss": {"stop_price": round(float(stop_price), 2)},
+        }
+        if order_type == "limit":
+            body["limit_price"] = round(float(entry_price), 2)
+        return self._post(f"{self.paper_url}/v2/orders", body) or {"error": "no response"}

@@ -11,14 +11,72 @@ which setups and which edges genuinely precede winners.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 
 import yfinance as yf
 
+from src import process_grader
 from src.database import Database
 
 logger = logging.getLogger(__name__)
+
+# archetype -> the entry_type label the journal shows
+_ENTRY_TYPE = {
+    "trending_pullback_to_pivot": "pullback-zone",
+    "reversal": "reversal-break",
+    "breakout_continuation": "breakout/retest",
+}
+
+# fields an analysis MUST carry to be gradeable; missing => UNGRADED (bright flag)
+_GRADEABLE_FIELDS = ("archetype", "dim_scores", "rs_vs_spy")
+
+
+def grade_fields(analysis: dict | None, *, model: str, sector_name: str | None,
+                 config: dict | None, db: Database) -> dict:
+    """Process-grade an analysis at open time -> the journal/grade columns.
+
+    Fails SOFT: if the analysis is missing the fields the grader needs (an
+    engine not yet refactored), the trade is logged UNGRADED rather than
+    silently blank -- a bright flag in the UI, never mistaken for a real grade.
+    """
+    analysis = analysis or {}
+    patterns = analysis.get("patterns") or []
+    base = {
+        "archetype": analysis.get("archetype"),
+        "timeframe_band": analysis.get("timeframe_band"),
+        "entry_type": _ENTRY_TYPE.get(analysis.get("archetype"), None),
+        "pattern": "; ".join(patterns) if patterns else None,
+        "rs_vs_spy": analysis.get("rs_vs_spy"),
+        "compression_tf": analysis.get("compression_tf"),
+        "planned_rr": analysis.get("risk_reward"),
+    }
+    if any(analysis.get(k) is None for k in _GRADEABLE_FIELDS):
+        base.update({
+            "process_grade": "UNGRADED", "process_score": None,
+            "process_flags": json.dumps(["ungraded_missing_fields"]),
+            "process_notes": "UNGRADED -- engine did not emit archetype/dim_scores/rs_vs_spy.",
+        })
+        return base
+
+    # sector context: is this a mega-cap sector leader (carve-out), and how is
+    # its sector ranked right now?
+    leaders = {s.upper() for s in (config or {}).get("sector_leaders", [])}
+    is_leader = str(analysis.get("symbol", "")).upper() in leaders
+    sector_score = None
+    if sector_name:
+        for r in db.get_latest_sector_rankings():
+            if r.get("sector_name") == sector_name:
+                sector_score = r.get("composite_score")
+                break
+    g = process_grader.grade(analysis, model=model, sector_score=sector_score,
+                             is_sector_leader=is_leader)
+    base.update({
+        "process_grade": g["grade"], "process_score": g["score"],
+        "process_flags": json.dumps(g["flags"]), "process_notes": g["notes"],
+    })
+    return base
 
 
 def _max_hold_days(timeframe: str) -> int:
@@ -34,8 +92,21 @@ def _max_hold_days(timeframe: str) -> int:
     return 21
 
 
-def open_from_proposal(db: Database, proposal: dict, proposal_id: int) -> None:
-    """Open a simulated trade mirroring a proposal (idempotent per proposal)."""
+def open_from_proposal(db: Database, proposal: dict, proposal_id: int, *,
+                       book: str = "algo", source: str = "algo",
+                       analysis: dict | None = None, config: dict | None = None) -> None:
+    """Open a simulated trade mirroring a proposal (idempotent per proposal).
+
+    Autonomous (scanner-opened) trades are the Autonomous Algo book (Log B):
+    tagged book='algo' and stamped with their process grade at open, so the
+    graded log is a faithful window into what the engine is doing -- required
+    now that no human approves each trade. `analysis` is the analyze() dict the
+    proposal came from (carries archetype/dim_scores/rs_vs_spy for grading).
+    """
+    gf = grade_fields(analysis, model=proposal.get("strategy", "swing"),
+                      sector_name=proposal.get("sector_name"), config=config, db=db)
+    shares = proposal.get("shares")
+    entry = proposal["entry_price"]
     db.open_paper_trade({
         "proposal_id": proposal_id,
         "symbol": proposal["symbol"],
@@ -46,12 +117,19 @@ def open_from_proposal(db: Database, proposal: dict, proposal_id: int) -> None:
         "num_edges": proposal.get("num_edges"),
         "edges_fired": proposal.get("edges_fired"),
         "sector_name": proposal.get("sector_name"),
-        "entry_price": proposal["entry_price"],
+        "entry_price": entry,
         "stop_loss": proposal["stop_loss"],
         "target_price": proposal["target_price"],
         "expected_timeframe": proposal.get("expected_timeframe"),
         "max_hold_days": _max_hold_days(proposal.get("expected_timeframe", "")),
+        "book": book, "source": source,
+        "shares": shares,
+        "position_value": round(shares * entry, 2) if shares and entry else None,
+        **gf,
     })
+    if gf.get("process_grade") == "UNGRADED":
+        logger.warning("UNGRADED open: %s (%s) -- analysis missing grade fields",
+                       proposal.get("symbol"), proposal.get("strategy"))
 
 
 def resolve_open(db: Database) -> dict[str, int]:

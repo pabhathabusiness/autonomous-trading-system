@@ -25,8 +25,10 @@ from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from src import bias_strip as bias_strip_module
 from src import live as live_module
 from src import paper_trader
+from src.scheduler import AutonomousScheduler
 from src.alpaca_client import AlpacaClient
 from src.database import Database
 from src.market_analyzer import MarketAnalyzer
@@ -72,8 +74,13 @@ def run_full_scan(config: dict[str, Any], db: Database, rh_client: RobinhoodClie
     summary: dict[str, Any] = {"market_regime": market, "hot_sectors": hot_sectors, "proposals": {}}
 
     for account_type in config["accounts"]:
-        account = db.get_account(account_type)
         account_cfg = config["accounts"][account_type]
+        # The 'algo' book (Log B) is not a screening account -- it mirrors every
+        # generated proposal into its own $100k book (wired in step 3), so skip
+        # it here. Also skip anything missing the screening config it needs.
+        if account_cfg.get("book") == "algo" or "price_range" not in account_cfg:
+            continue
+        account = db.get_account(account_type)
         # When hide_balance is set, always size trades against the fixed
         # starting_balance rather than the (hidden) running balance -- the
         # account is treated as "always at that amount" for sizing.
@@ -92,7 +99,9 @@ def run_full_scan(config: dict[str, Any], db: Database, rh_client: RobinhoodClie
             analysis = p.pop("_analysis")
             db.insert_technical_analysis({**analysis, "symbol": p["symbol"]})
             pid = db.insert_proposal(p)
-            paper_trader.open_from_proposal(db, p, pid)  # auto-track as a sim trade
+            # Autonomous Algo book (Log B), graded at open
+            paper_trader.open_from_proposal(db, p, pid, analysis={**analysis, "symbol": p["symbol"]},
+                                            config=config)
 
         summary["proposals"][account_type] = len(proposals)
 
@@ -181,7 +190,7 @@ def generate_short_term_ideas(
                           f"~{a['expected_return_pct']}% in {a['expected_timeframe']}."),
         }
         pid = db.insert_proposal(proposal)
-        paper_trader.open_from_proposal(db, proposal, pid)  # auto-track as a sim trade
+        paper_trader.open_from_proposal(db, proposal, pid, analysis=a, config=config)
         stored += 1
     logger.info("Short-term ideas: %d stored (scanned %d names)", stored, len(symbol_sector))
     return stored
@@ -258,7 +267,7 @@ def generate_downside_ideas(
                           f"{a['risk_reward']}:1, ~{a['expected_return_pct']}% if it falls."),
         }
         pid = db.insert_proposal(proposal)
-        paper_trader.open_from_proposal(db, proposal, pid)
+        paper_trader.open_from_proposal(db, proposal, pid, analysis=a, config=config)
         stored += 1
     logger.info("Downside ideas: %d stored across %d negative sectors", stored, len(negative))
     return stored
@@ -281,8 +290,6 @@ def generate_coiling_ideas(
     for sector in list(hot_sectors) + list(turning_sectors):
         for sym in sector_analyzer.candidates_for_sector(sector):
             symbol_sector.setdefault(sym, sector)
-    for w in db.get_watchlist():  # catalyst watchlist always included
-        symbol_sector.setdefault(w["symbol"], "Watchlist")
 
     coils: list[dict[str, Any]] = []
     for symbol, sector in symbol_sector.items():
@@ -323,10 +330,9 @@ def generate_coiling_ideas(
                           f"stop {a['stop_loss']}."),
         }
         pid = db.insert_proposal(proposal)
-        paper_trader.open_from_proposal(db, proposal, pid)
+        paper_trader.open_from_proposal(db, proposal, pid, analysis=a, config=config)
         stored += 1
-    logger.info("Coiling ideas: %d stored (scanned %d names, %d watchlist)",
-                stored, len(symbol_sector), len(db.get_watchlist()))
+    logger.info("Coiling ideas: %d stored (scanned %d names)", stored, len(symbol_sector))
     return stored
 
 
@@ -695,6 +701,53 @@ def get_turning_sectors() -> list[str]:
 @app.post("/api/scan")
 def trigger_scan() -> dict[str, Any]:
     return run_full_scan(CONFIG, DB, RH)
+
+
+# --------------------------------------------------------------- autonomous engine
+# Replaces the manual "Run Scan": scans on a cadence + continuously monitors and
+# closes open positions at target/stop. Set env DASH_NO_SCHED=1 to disable (e.g.
+# during tests). Opening trades is simulated unless autonomous.auto_execute=true.
+SCHEDULER = AutonomousScheduler(CONFIG, DB, ALPACA, lambda: run_full_scan(CONFIG, DB, RH))
+
+
+@app.on_event("startup")
+def _start_scheduler() -> None:
+    if os.environ.get("DASH_NO_SCHED") == "1":
+        logger.info("Autonomous scheduler suppressed via DASH_NO_SCHED=1")
+        return
+    SCHEDULER.start()
+
+
+@app.on_event("shutdown")
+def _stop_scheduler() -> None:
+    SCHEDULER.stop()
+
+
+@app.get("/api/scheduler")
+def scheduler_status() -> dict[str, Any]:
+    return SCHEDULER.status()
+
+
+@app.get("/api/bias-strip")
+def get_bias_strip() -> dict[str, Any]:
+    """SPY + mega-caps: live price, conditional bias, and key level above/below.
+    Powers the dashboard's top Market Bias strip (cached structure + live price)."""
+    mega = CONFIG.get("dashboard", {}).get(
+        "bias_strip", ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA"])
+    symbols = ["SPY"] + [s for s in mega if s != "SPY"]
+    return {"as_of": datetime.now(timezone.utc).isoformat(),
+            "alpaca_enabled": ALPACA.enabled,
+            "symbols": bias_strip_module.build(ALPACA, symbols)}
+
+
+@app.get("/api/log/algo")
+def get_algo_log(status: Optional[str] = None) -> dict[str, Any]:
+    """Autonomous Algo book (Log B): every scanner-opened trade with its process
+    grade + classification, newest first. `open` / `closed` filterable."""
+    trades = [t for t in DB.get_paper_trades(status=status) if (t.get("book") or "algo") == "algo"]
+    graded = sum(1 for t in trades if t.get("process_grade") and t["process_grade"] != "UNGRADED")
+    ungraded = sum(1 for t in trades if t.get("process_grade") == "UNGRADED")
+    return {"count": len(trades), "graded": graded, "ungraded": ungraded, "trades": trades}
 
 
 if STATIC_DIR.exists():

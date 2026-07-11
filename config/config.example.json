@@ -27,7 +27,27 @@
       "max_total_proposals": 20,
       "pause_new_entries_on_bear": true,
       "bear_quality_bump": 1.0
+    },
+    "algo": {
+      "starting_balance": 100000,
+      "book": "algo",
+      "max_risk_per_trade_pct": 1.0,
+      "max_concurrent_positions": 20,
+      "note": "Log B -- the autonomous Alpaca PAPER book. Simulated money, real fills."
     }
+  },
+  "autonomous": {
+    "auto_execute": false,
+    "auto_execute_accounts": ["algo"],
+    "scan_interval_min": 15,
+    "monitor_interval_sec": 60,
+    "market_hours_only": true,
+    "bands": {"day_trade": true, "short_term": true, "swing": true},
+    "note": "auto_execute stays FALSE until you deliberately enable it on the server. Only 'algo' (paper) may ever be listed here; real-money accounts are hard-blocked by execution_guard."
+  },
+  "sector_leaders": ["AAPL", "MSFT", "NVDA", "GOOGL", "GOOG", "AMZN", "META", "TSLA", "AVGO", "NFLX"],
+  "dashboard": {
+    "bias_strip": ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA"]
   },
   "market_regime": {
     "symbol": "SPY",
@@ -99,6 +119,7 @@
   },
   "alpaca": {
     "enabled": false,
+    "paper_only": true,
     "alpaca_key": "YOUR_ALPACA_KEY_ID",
     "alpaca_secret": "YOUR_ALPACA_SECRET_KEY",
     "data_url": "https://data.alpaca.markets",

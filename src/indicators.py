@@ -34,6 +34,58 @@ def sma(closes: pd.Series, period: int) -> Optional[float]:
     return float(value) if pd.notna(value) else None
 
 
+def ema(closes: pd.Series, period: int) -> Optional[float]:
+    """Latest exponential moving average."""
+    if len(closes) < period:
+        return None
+    value = closes.ewm(span=period, adjust=False).mean().iloc[-1]
+    return float(value) if pd.notna(value) else None
+
+
+def ema_alignment(closes: pd.Series, fast: int, slow: int, direction: str = "up") -> Optional[bool]:
+    """Is the fast EMA above (up) / below (down) the slow EMA? Used for the
+    9/21 (intraday timing), 20/50 (swing trend) and 50/200 (backdrop = the
+    golden/death cross) EMA reads that feed the single capped momentum
+    dimension. Returns None when there isn't enough history to judge."""
+    ef, es = ema(closes, fast), ema(closes, slow)
+    if ef is None or es is None:
+        return None
+    return ef > es if direction == "up" else ef < es
+
+
+def mfi(df: pd.DataFrame, period: int = 14) -> float:
+    """Money Flow Index -- the volume-weighted RSI. Uses typical price x
+    volume, splitting money flow into up-days vs down-days over `period`.
+    Replaces RSI everywhere (user does not trade off RSI). 0-100; ~50 neutral,
+    >80 overbought, <20 oversold. Falls back to 50.0 without enough data."""
+    need = {"High", "Low", "Close", "Volume"}
+    if df is None or df.empty or not need.issubset(df.columns) or len(df) <= period:
+        return 50.0
+    typical = (df["High"] + df["Low"] + df["Close"]) / 3
+    money_flow = typical * df["Volume"]
+    delta = typical.diff()
+    pos = money_flow.where(delta > 0, 0.0)
+    neg = money_flow.where(delta < 0, 0.0)
+    pos_sum = pos.rolling(period).sum()
+    neg_sum = neg.rolling(period).sum()
+    ratio = pos_sum / neg_sum.replace(0, np.nan)
+    value = (100 - 100 / (1 + ratio)).iloc[-1]
+    return float(value) if pd.notna(value) else 50.0
+
+
+def relative_strength(closes: pd.Series, bench_closes: pd.Series,
+                      period: int = 20) -> Optional[float]:
+    """Relative strength vs a benchmark (SPY): symbol %-return minus
+    benchmark %-return over `period` bars. Positive = outperforming the
+    market. This is the scored RS edge (independent signal) + a logged field
+    whose correlation with wins the feedback review surfaces."""
+    r_sym = roc(closes, period)
+    r_ben = roc(bench_closes, period)
+    if r_sym is None or r_ben is None:
+        return None
+    return round(r_sym - r_ben, 2)
+
+
 def roc(closes: pd.Series, period: int) -> Optional[float]:
     """Rate of change (%) over `period` bars."""
     if len(closes) <= period:

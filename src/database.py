@@ -231,6 +231,27 @@ class Database:
             ],
             "paper_trades": [
                 ("direction", "TEXT"),
+                # --- book / source (Log A "mine" vs Log B "algo") ---
+                ("book", "TEXT"),
+                ("source", "TEXT"),
+                # --- classification / logged context (from analyze()) ---
+                ("archetype", "TEXT"),
+                ("timeframe_band", "TEXT"),
+                ("entry_type", "TEXT"),
+                ("pattern", "TEXT"),
+                ("rs_vs_spy", "REAL"),
+                ("compression_tf", "TEXT"),
+                ("planned_rr", "REAL"),
+                # --- process grade (outcome-independent) ---
+                ("process_grade", "TEXT"),
+                ("process_score", "REAL"),
+                ("process_flags", "TEXT"),
+                ("process_notes", "TEXT"),
+                # --- dollar accounting + R (filled at close) ---
+                ("shares", "REAL"),
+                ("position_value", "REAL"),
+                ("r_multiple", "REAL"),
+                ("pnl_usd", "REAL"),
             ],
         }
         for table, cols in migrations.items():
@@ -405,15 +426,28 @@ class Database:
         or later) never piles up duplicate open trades."""
         data = {**data, "entry_date": data.get("entry_date", _now()),
                 "direction": data.get("direction", "long")}
+        # default any journal/grade fields the caller didn't supply so the
+        # named-param INSERT never raises on a missing key.
+        for k in ("book", "source", "archetype", "timeframe_band", "entry_type",
+                  "pattern", "rs_vs_spy", "compression_tf", "planned_rr",
+                  "process_grade", "process_score", "process_flags", "process_notes",
+                  "shares", "position_value"):
+            data.setdefault(k, None)
         with self._conn() as conn:
             cur = conn.execute(
                 """INSERT INTO paper_trades
                    (proposal_id, symbol, account_type, strategy, direction, confidence, num_edges,
                     edges_fired, sector_name, entry_price, stop_loss, target_price,
-                    expected_timeframe, entry_date, max_hold_days, status)
+                    expected_timeframe, entry_date, max_hold_days, status,
+                    book, source, archetype, timeframe_band, entry_type, pattern, rs_vs_spy,
+                    compression_tf, planned_rr, process_grade, process_score, process_flags,
+                    process_notes, shares, position_value)
                    SELECT :proposal_id, :symbol, :account_type, :strategy, :direction, :confidence,
                           :num_edges, :edges_fired, :sector_name, :entry_price, :stop_loss,
-                          :target_price, :expected_timeframe, :entry_date, :max_hold_days, 'open'
+                          :target_price, :expected_timeframe, :entry_date, :max_hold_days, 'open',
+                          :book, :source, :archetype, :timeframe_band, :entry_type, :pattern,
+                          :rs_vs_spy, :compression_tf, :planned_rr, :process_grade, :process_score,
+                          :process_flags, :process_notes, :shares, :position_value
                    WHERE NOT EXISTS (
                        SELECT 1 FROM paper_trades
                        WHERE symbol = :symbol AND strategy = :strategy AND status = 'open'
@@ -435,11 +469,28 @@ class Database:
     def close_paper_trade(self, trade_id: int, exit_price: float, return_pct: float,
                           outcome: str, status: str) -> None:
         with self._conn() as conn:
+            row = conn.execute(
+                "SELECT entry_price, stop_loss, direction, shares FROM paper_trades WHERE id = ?",
+                (trade_id,)).fetchone()
+            r_multiple = pnl_usd = None
+            if row:
+                entry, stop = row["entry_price"], row["stop_loss"]
+                is_short = row["direction"] == "short"
+                # R-multiple: realized return divided by the planned risk-to-stop
+                # (both as % of entry). +1R = made exactly what was risked; -1R = full stop.
+                risk_pct = (abs(entry - stop) / entry * 100) if entry else 0.0
+                if risk_pct > 0:
+                    r_multiple = round(return_pct / risk_pct, 2)
+                if row["shares"]:
+                    per_share = (entry - exit_price) if is_short else (exit_price - entry)
+                    pnl_usd = round(row["shares"] * per_share, 2)
             conn.execute(
                 """UPDATE paper_trades
-                   SET status = ?, outcome = ?, exit_price = ?, return_pct = ?, exit_date = ?
+                   SET status = ?, outcome = ?, exit_price = ?, return_pct = ?, exit_date = ?,
+                       r_multiple = ?, pnl_usd = ?
                    WHERE id = ?""",
-                (status, outcome, round(exit_price, 4), round(return_pct, 2), _now(), trade_id),
+                (status, outcome, round(exit_price, 4), round(return_pct, 2), _now(),
+                 r_multiple, pnl_usd, trade_id),
             )
 
     def get_track_record(self) -> list[dict[str, Any]]:

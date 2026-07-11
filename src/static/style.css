@@ -344,3 +344,24 @@ tr.jrow:hover { background: rgba(255,255,255,0.03); }
 .flag { font-size: 10.5px; color: var(--muted); background: rgba(255,255,255,0.05); padding: 3px 8px; border-radius: 6px; }
 
 @media (max-width: 800px) { .board { grid-template-columns: 1fr; } .idea { grid-template-columns: 52px 1fr 48px; } .idea .i-rr { display: none; } }
+
+/* ---- Track Record page ---- */
+.scorecards { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 18px; }
+.scard { background: var(--card-bg); border: 1px solid var(--border); border-radius: 14px; padding: 16px; }
+.scard .big { font-size: 26px; font-weight: 800; letter-spacing: -0.02em; }
+.scard .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-top: 4px; }
+.scard.grades { display: flex; flex-direction: column; justify-content: center; }
+.gdist { display: flex; flex-wrap: wrap; gap: 5px; }
+.gpill { font-size: 11px; font-weight: 700; padding: 3px 7px; border-radius: 6px; }
+
+table.track { width: 100%; border-collapse: collapse; }
+table.track th { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--border); }
+table.track td { padding: 10px 8px; border-bottom: 1px solid var(--border); font-size: 13px; vertical-align: top; }
+table.track tr.jrow { cursor: pointer; }
+table.track tr.jrow:hover { background: rgba(255,255,255,0.03); }
+table.track .nowrap { white-space: nowrap; }
+table.track .feedback { max-width: 230px; font-size: 12px; }
+.tagopen { font-size: 10.5px; font-weight: 700; color: var(--grade); background: rgba(124,58,237,0.15); padding: 2px 7px; border-radius: 6px; }
+.pnlcol { text-align: right; white-space: nowrap; }
+
+@media (max-width: 900px) { .scorecards { grid-template-columns: 1fr 1fr; } .scard.grades { grid-column: 1 / -1; } }

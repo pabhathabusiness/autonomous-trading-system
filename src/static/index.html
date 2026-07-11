@@ -11,7 +11,7 @@
     <div class="brand">pabs<span class="brand-dot">.</span>trading</div>
     <nav class="navtabs">
       <button class="navtab active" data-view="dashboard">Dashboard</button>
-      <button class="navtab" data-view="journal">Journal</button>
+      <button class="navtab" data-view="track">Track Record</button>
       <button class="navtab" data-view="sectors">Sectors</button>
       <button class="navtab" data-view="more">More</button>
     </nav>
@@ -42,12 +42,13 @@
     </section>
   </main>
 
-  <!-- ===================== JOURNAL (Log B) ===================== -->
-  <main id="view-journal" class="view">
+  <!-- ===================== TRACK RECORD (Log B) ===================== -->
+  <main id="view-track" class="view">
     <section class="block">
-      <div class="block-head"><h2>Autonomous Algo — Log B</h2>
-        <span class="sub" id="journal-summary"></span></div>
-      <div id="journal-algo">Loading…</div>
+      <div class="block-head"><h2>Track Record — every algo trade</h2>
+        <span class="sub" id="track-summary">autofills after each execution · paper (pulls Alpaca marks once auto-execute is on)</span></div>
+      <div id="track-cards" class="scorecards"></div>
+      <div id="track-body">Loading…</div>
     </section>
   </main>
 
@@ -80,11 +81,6 @@
         <button class="tab" data-view="timeframe">By Timeframe</button>
       </div>
       <div id="proposals-content">Loading...</div>
-    </section>
-
-    <section class="card" id="track-record">
-      <h2>Track Record <span class="hint">(auto-simulated: every proposal is paper-traded and scored against real prices)</span></h2>
-      <div id="track-record-content">Loading...</div>
     </section>
 
     <section class="card">

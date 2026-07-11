@@ -433,6 +433,7 @@ async function loadLive() {
 
 async function loadTrackRecord() {
   const el = $("track-record-content");
+  if (!el) return;   // legacy panel removed; Track Record is now its own page
   try {
     const r = await fetchJSON("/api/track-record");
     if (!r.by_tier.length) {
@@ -495,7 +496,7 @@ async function loadTrackRecord() {
 
 async function loadAll() {
   await Promise.all([loadRegime(), loadAccounts(), loadPerformance(), loadSectors(),
-    loadProposals(), loadTrackRecord(), loadLive(), loadTrades()]);
+    loadProposals(), loadLive(), loadTrades()]);
 }
 
 // The autonomous engine replaces the old manual "Run Scan": show its status.
@@ -600,30 +601,57 @@ function renderIdeasFeed(d) {
     : '<p class="muted">No open algo trades yet — the engine opens them as setups qualify.</p>';
 }
 
-function renderJournal(d) {
-  const el = $("journal-algo"); if (!el) return;
-  const sm = $("journal-summary");
-  if (sm) sm.textContent = `${d.count} trades · ${d.graded} graded · ${d.ungraded} ungraded`;
+function renderTrackRecord(d) {
+  const el = $("track-body"); if (!el) return;
   const trades = d.trades || [];
-  if (!trades.length) { el.innerHTML = '<p class="muted">No algo trades yet.</p>'; return; }
-  el.innerHTML = `<table class="journal"><thead><tr>
-      <th>Grade</th><th>Symbol</th><th>Setup</th><th>Band</th><th>Plan (entry→stop/target)</th>
-      <th>R:R</th><th>Status</th><th>Live / Result</th><th class="muted">P&L</th></tr></thead><tbody>` +
+  const sm = $("track-summary");
+
+  // summary scorecards from CLOSED trades (outcome is real; process is graded)
+  const closed = trades.filter(t => t.status === 'closed');
+  const wins = closed.filter(t => t.outcome === 'win').length;
+  const rVals = closed.map(t => t.r_multiple).filter(v => v != null);
+  const avgR = rVals.length ? rVals.reduce((a, b) => a + b, 0) / rVals.length : null;
+  const totalPnl = closed.reduce((a, t) => a + (t.pnl_usd || 0), 0);
+  const winRate = closed.length ? 100 * wins / closed.length : null;
+  const dist = { A: 0, B: 0, C: 0, D: 0, F: 0, UG: 0 };
+  trades.forEach(t => { const g = t.process_grade === 'UNGRADED' ? 'UG' : t.process_grade; if (g in dist) dist[g]++; });
+
+  const cards = $("track-cards");
+  if (cards) cards.innerHTML = `
+    <div class="scard"><div class="big">${trades.length}</div><div class="lbl">trades logged</div></div>
+    <div class="scard"><div class="big">${winRate != null ? num(winRate, 0) + '%' : '—'}</div><div class="lbl">win rate (${closed.length} closed)</div></div>
+    <div class="scard"><div class="big ${(avgR ?? 0) >= 0 ? 'pos' : 'neg'}">${avgR != null ? signed(avgR, 2) + 'R' : '—'}</div><div class="lbl">avg R-multiple</div></div>
+    <div class="scard"><div class="big ${totalPnl >= 0 ? 'pos' : 'neg'}">${money(totalPnl, 0)}</div><div class="lbl">realized P&L</div></div>
+    <div class="scard grades"><div class="gdist">
+      ${['A', 'B', 'C', 'D', 'F', 'UG'].map(g => `<span class="gpill ${g === 'UG' ? 'g-U' : 'g-' + g}">${g} ${dist[g]}</span>`).join("")}
+    </div><div class="lbl">process grades</div></div>`;
+
+  if (sm) sm.textContent = `${d.count} trades · ${d.graded} graded · ${d.ungraded} ungraded — autofills after each execution`;
+  if (!trades.length) { el.innerHTML = '<p class="muted">No algo trades yet — rows appear here automatically as the engine takes trades.</p>'; return; }
+
+  el.innerHTML = `<table class="track"><thead><tr>
+      <th>Date</th><th>Symbol</th><th>Setup</th><th>Band</th><th>Entry → Stop / Target</th>
+      <th>R:R</th><th>Grade</th><th>Feedback</th><th>Outcome</th><th class="pnlcol">R / P&L</th></tr></thead><tbody>` +
     trades.map(t => {
       const live = liveIndex[t.symbol], isOpen = t.status === 'open';
-      const result = isOpen
-        ? (live ? `${price(live.live_price)} ${ageLabel(live.age_seconds)} <span class="${(live.live_pnl_pct ?? 0) >= 0 ? 'pos' : 'neg'}">${pct(live.live_pnl_pct, 1)}</span>` : '<span class="muted">—</span>')
-        : `<span class="${t.outcome === 'win' ? 'pos' : 'neg'}">${(t.outcome || '').toUpperCase()}</span> ${t.r_multiple != null ? '· ' + signed(t.r_multiple, 2) + 'R' : ''}`;
+      const outcome = isOpen
+        ? (live ? `<span class="tagopen">open</span> <span class="${(live.live_pnl_pct ?? 0) >= 0 ? 'pos' : 'neg'}">${pct(live.live_pnl_pct, 1)}</span> ${ageLabel(live.age_seconds)}`
+          : '<span class="tagopen">open</span>')
+        : `<span class="${t.outcome === 'win' ? 'pos' : 'neg'}">${(t.outcome || '').toUpperCase()}</span>`;
+      const rpnl = isOpen ? '<span class="muted">—</span>'
+        : `<span class="${(t.r_multiple ?? 0) >= 0 ? 'pos' : 'neg'}">${t.r_multiple != null ? signed(t.r_multiple, 2) + 'R' : '—'}</span>
+           <span class="muted">${t.pnl_usd != null ? money(t.pnl_usd) : ''}</span>`;
       return `<tr class="jrow" onclick="openTrade(${t.id})">
-        <td><span class="grade sm ${gradeClass(t.process_grade)}" title="${t.process_grade || ''}">${gradeText(t.process_grade)}</span></td>
+        <td class="muted nowrap">${(t.entry_date || '').slice(0, 10)}</td>
         <td><strong>${t.symbol}</strong>${t.direction === 'short' ? ' <span class="short-tag">▼</span>' : ''}</td>
         <td>${archLabel(t.archetype)}</td>
         <td class="muted">${bandLabel(t.timeframe_band)}</td>
-        <td class="muted">${price(t.entry_price)}→${price(t.stop_loss)}/${price(t.target_price)}</td>
+        <td class="muted nowrap">${price(t.entry_price)} → ${price(t.stop_loss)} / ${price(t.target_price)}</td>
         <td>${num(t.planned_rr || t.risk_reward, 1)}:1</td>
-        <td>${isOpen ? '<span class="pos">open</span>' : 'closed'}</td>
-        <td>${result}</td>
-        <td class="muted pnlcol">${t.pnl_usd != null ? money(t.pnl_usd) : ''}</td>
+        <td><span class="grade sm ${gradeClass(t.process_grade)}" title="${t.process_grade || ''}">${gradeText(t.process_grade)}</span></td>
+        <td class="feedback muted">${t.process_notes || '—'}</td>
+        <td>${outcome}</td>
+        <td class="pnlcol">${rpnl}</td>
       </tr>`;
     }).join("") + "</tbody></table>";
 }
@@ -635,7 +663,7 @@ async function loadAlgo() {
     algoIndex = {};
     (d.trades || []).forEach(t => algoIndex[t.id] = t);
     renderIdeasFeed(d);
-    renderJournal(d);
+    renderTrackRecord(d);
   } catch (e) {
     const el = $("ideas-feed"); if (el) el.innerHTML = `<p class="muted">${e.message}</p>`;
   }
@@ -701,7 +729,7 @@ function switchView(v) {
   document.querySelectorAll(".navtab").forEach(t => t.classList.toggle("active", t.dataset.view === v));
   document.querySelectorAll(".view").forEach(s => s.classList.toggle("active", s.id === "view-" + v));
   if (v === "dashboard") { loadBiasStrip(); loadSectorBoard(); loadAlgo(); }
-  else if (v === "journal") { loadAlgo(); }
+  else if (v === "track") { loadAlgo(); }
   else if (v === "sectors") { loadSectors(); }
   else if (v === "more") { loadAll(); }
 }
@@ -732,7 +760,7 @@ loadAll();
 setInterval(() => {
   const v = currentView();
   if (v === "dashboard") { loadBiasStrip(); loadSectorBoard(); loadAlgo(); }
-  else if (v === "journal") { loadAlgo(); }
+  else if (v === "track") { loadAlgo(); }
 }, 6000);
 setInterval(loadEngineStatus, 15000);
 setInterval(() => { if (currentView() === "more") { loadLive(); } }, 5000);

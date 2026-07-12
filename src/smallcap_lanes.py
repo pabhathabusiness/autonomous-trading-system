@@ -266,7 +266,8 @@ def eval_lane(lane: str, row: dict[str, Any], families: dict[str, float],
     ins = sig.get("insider") or {}
     if ins.get("cluster") or ins.get("score", 0) >= 0.7:
         n, dollars, ago = ins.get("buyers_distinct", 0), ins.get("net_dollars", 0), ins.get("last_buy_days_ago")
-        chips.append(f"INSIDER BUY {n}·${int(dollars/1000)}k·{ago}d" if dollars else "INSIDER BUY")
+        amt = (f"${dollars/1e6:.1f}M" if abs(dollars) >= 1e6 else f"${int(dollars/1000)}k") if dollars else ""
+        chips.append(f"INSIDER BUY {n}·{amt}·{ago}d" if amt else "INSIDER BUY")
     if (sig.get("fundamental_trends") or {}).get("revenue_trend") == "accelerating":
         chips.append("REV ACCEL")
     ct = (sig.get("catalyst_class") or {}).get("type")

@@ -10,8 +10,11 @@ counting as a POSITIVE catalyst. A stock spiking on an offering is spiking DOWN.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 # A4 3.1 taxonomy. Order matters: hard-negatives are checked first so an
 # "offering" headline can never be mistaken for a positive catalyst.
@@ -89,29 +92,44 @@ _BUY_CODE = "P"                       # open-market purchase ONLY
 _COMP_CODES = {"M", "A", "G"}         # option exercise / grant / gift -> NOT a vote
 
 
-def insider_score(txns: Optional[list[dict[str, Any]]], asof: Optional[datetime] = None) -> dict[str, Any]:
+def insider_score(txns: Optional[list[dict[str, Any]]], asof: Optional[datetime] = None,
+                  market_cap_m: Optional[float] = None) -> dict[str, Any]:
     """Open-market ('P') purchases only. Cluster = >=2 distinct insiders buying
-    within a 30d window. Returns {score, cluster, net_dollars, buyers_distinct, ...}."""
+    within a 30d window. Returns {score, cluster, net_dollars, buyers_distinct, ...}.
+
+    P2 units fix: Finnhub `share` is the insider's TOTAL post-transaction holdings;
+    `change` is the actual transaction size (signed). Use `change`. Guard: any
+    single transaction whose dollar value exceeds 25% of market cap is a data
+    error -> drop it + log (never let a bad row inflate the signal)."""
     asof = asof or datetime.now(timezone.utc)
     out = {"score": 0.0, "cluster": False, "buyers_distinct": 0, "net_dollars": 0.0,
-           "net_shares": 0.0, "last_buy_days_ago": None, "heavy_selling": False}
+           "net_shares": 0.0, "last_buy_days_ago": None, "heavy_selling": False, "dropped_rows": 0}
     if not txns:
         return out
+    cap_dollars = market_cap_m * 1e6 if market_cap_m else None
     buys, sells_dollars = [], 0.0
     for t in txns:
         code = (t.get("transactionCode") or "").upper()
-        shares = t.get("share") or t.get("change") or 0
+        change = t.get("change") or 0          # transaction size (NOT `share` = holdings)
         price = t.get("transactionPrice") or 0
+        if not change:
+            continue
+        dollars = abs(change) * price
+        if cap_dollars and dollars > 0.25 * cap_dollars:
+            logger.warning("insider txn $%.0f > 25%% mcap ($%.0f) for %s -- dropping as data error",
+                           dollars, cap_dollars, t.get("name"))
+            out["dropped_rows"] += 1
+            continue
         try:
             d = datetime.fromisoformat(str(t.get("transactionDate") or t.get("filingDate") or "")[:10])
             d = d.replace(tzinfo=timezone.utc)
         except (ValueError, TypeError):
             d = None
-        if code == _BUY_CODE and shares and shares > 0:
-            buys.append({"name": t.get("name"), "dollars": abs(shares) * price, "date": d,
+        if code == _BUY_CODE and change > 0:
+            buys.append({"name": t.get("name"), "dollars": dollars, "date": d,
                          "days_ago": (asof - d).days if d else 9999})
-        elif code == "S" and shares:
-            sells_dollars += abs(shares) * price
+        elif code == "S":
+            sells_dollars += dollars
     if buys:
         out["net_shares"] = sum(1 for _ in buys)
         out["net_dollars"] = round(sum(b["dollars"] for b in buys) - sells_dollars, 0)

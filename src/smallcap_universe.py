@@ -282,7 +282,8 @@ def enrich_symbol(db: Database, fh: FinnhubClient, symbol: str,
     # A4: classify news polarity (offering/going_concern are NOT positive catalysts)
     news_class = edges.classify_news(news, now_ts, window_days=7)
     txns = _cached(db, f"sc:insider:{symbol}", _INSIDER_TTL_S, lambda: fh.insider_transactions(symbol))
-    insider = edges.insider_score((txns or {}).get("data") if isinstance(txns, dict) else None)
+    insider = edges.insider_score((txns or {}).get("data") if isinstance(txns, dict) else None,
+                                  market_cap_m=prof.get("marketCapitalization"))
     r52 = edges.range52_beta(metric, price)
 
     signals_blob = {

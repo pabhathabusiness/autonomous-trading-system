@@ -27,7 +27,10 @@ LANES = ("special", "value", "bounce", "coiled", "runner", "hailmary")
 EDGE_FAMILIES = ("volume", "structure", "compression", "trend", "fundamental",
                  "catalyst", "sector", "float", "insider")
 
-COMPOSITE_THRESHOLD = 7.0    # tunable by the dry scan (F4: floor 6.0, ceiling 8.0)
+COMPOSITE_THRESHOLD = 6.5    # F4 tune: dry-scan sample (weekend, no sector panel)
+                             # understated live composites by ~0.9, so stepped 7.0->6.5
+                             # (not F4's 6.0 floor -- safer on understated data).
+                             # RE-VALIDATE on the full live universe + trading day.
 MIN_FAMILIES = 3             # >= 3 independent families firing (each >= FAMILY_FIRE)
 FAMILY_FIRE = 0.5
 

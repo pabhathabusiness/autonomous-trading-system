@@ -56,8 +56,11 @@ class RiskContext:
     # liquidity inputs
     avg_dollar_vol: Optional[float] = None
     rel_vol: Optional[float] = None
-    # B3 earnings guard: days to next earnings. None => UNKNOWN => refuse (fail closed).
+    # B3 earnings guard. earnings_available: was the calendar SEARCHED? If False,
+    # the fetch failed -> UNKNOWN -> fail closed. If True, days_to_earnings None
+    # means "no upcoming earnings" -> safe. int means days to the next report.
     days_to_earnings: Optional[int] = None
+    earnings_available: bool = False
 
 
 @dataclass
@@ -146,15 +149,19 @@ def evaluate(ctx: RiskContext) -> RiskDecision:
             why.append(f"participation {part:.2f}% > {max_part}%")
     check("liquidity", liq_ok, "; ".join(why) or "ok")
 
-    # 6. earnings-proximity blackout. FAILS CLOSED on unknown: an unknown earnings
-    # date (fetch failed) is not "clear of earnings" -- it's "we can't confirm", so
-    # we refuse. Enforceable only because GATE 1 fetches per-symbol earnings.
+    # 6. earnings-proximity blackout. Distinguish (silent-substitution trap):
+    #    - fetch FAILED (not earnings_available) -> UNKNOWN -> fail closed (refuse).
+    #    - searched, NO upcoming earnings (days None but available) -> SAFE -> pass.
+    #    - searched, earnings within the blackout window -> refuse (real blackout).
     blackout = int(r.get("earnings_blackout_days", 2))
     dte = ctx.days_to_earnings
-    earnings_ok = dte is not None and dte > blackout
-    check("earnings_proximity", earnings_ok,
-          "earnings date unknown (fail closed)" if dte is None
-          else f"earnings in {dte}d <= {blackout}d blackout")
+    if not ctx.earnings_available:
+        earnings_ok, why_e = False, "earnings unavailable (fetch failed) -- fail closed"
+    elif dte is not None and dte <= blackout:
+        earnings_ok, why_e = False, f"earnings in {dte}d <= {blackout}d blackout"
+    else:
+        earnings_ok, why_e = True, "clear"
+    check("earnings_proximity", earnings_ok, why_e)
 
     approved = all(checks.values())
     reason = "approved" if approved else " | ".join(fails)

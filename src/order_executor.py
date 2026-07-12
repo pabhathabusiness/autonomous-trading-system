@@ -92,7 +92,7 @@ def _primary_refusal(decision, ctx) -> str:
     is too small (a chart trigger outside it has no earnings date)."""
     ch = decision.checks
     if not ch.get("earnings_proximity", True):
-        return "unknown_earnings" if ctx.days_to_earnings is None else "earnings_blackout"
+        return "unknown_earnings" if not ctx.earnings_available else "earnings_blackout"
     for name in ("not_halted", "position_sizing", "max_open_risk", "per_lane_cap",
                  "sector_cap", "liquidity"):
         if not ch.get(name, True):
@@ -123,7 +123,8 @@ def _execute_one(db, alpaca, risk_mgr, config, c: dict[str, Any],
         lane_notional=db.open_notional_by_lane(account_type),
         halted=risk_state.is_halted(db, account_type),
         avg_dollar_vol=c.get("avg_dollar_vol"), rel_vol=c.get("rel_vol"),
-        days_to_earnings=c.get("days_to_earnings"))
+        days_to_earnings=c.get("days_to_earnings"),
+        earnings_available=bool(c.get("earnings_available")))
     decision = risk_gate.evaluate(ctx)
     if not decision.approved:
         reason = _primary_refusal(decision, ctx)

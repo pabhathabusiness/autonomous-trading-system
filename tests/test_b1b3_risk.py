@@ -41,7 +41,8 @@ def base_ctx(**over):
     d = dict(account_type="algo", symbol="TEST", equity=100000.0, entry=3.0, stop=2.7,
              target=3.6, shares=3333, sector="Technology", lane="turnaround",
              config=make_config(), open_risk=0.0, sector_counts={}, lane_notional={},
-             halted=False, avg_dollar_vol=5_000_000.0, rel_vol=2.0, days_to_earnings=10)
+             halted=False, avg_dollar_vol=5_000_000.0, rel_vol=2.0, days_to_earnings=10,
+             earnings_available=True)
     d.update(over)
     return RiskContext(**d)
 
@@ -140,14 +141,16 @@ def test_gate_halted():
 
 
 def test_gate_earnings_proximity():
-    # unknown earnings date -> FAIL CLOSED
-    assert not risk_gate.evaluate(base_ctx(days_to_earnings=None)).checks["earnings_proximity"]
-    # inside the 2-day blackout -> fail
+    # fetch FAILED (unavailable) -> UNKNOWN -> fail closed
+    assert not risk_gate.evaluate(base_ctx(earnings_available=False)).checks["earnings_proximity"]
+    assert not risk_gate.evaluate(base_ctx(earnings_available=False)).approved
+    # searched, NO upcoming earnings (days None but available) -> SAFE -> pass
+    assert risk_gate.evaluate(base_ctx(earnings_available=True, days_to_earnings=None)).checks["earnings_proximity"]
+    # searched, earnings WITHIN the 2-day blackout -> fail
     assert not risk_gate.evaluate(base_ctx(days_to_earnings=1)).checks["earnings_proximity"]
     assert not risk_gate.evaluate(base_ctx(days_to_earnings=2)).checks["earnings_proximity"]
     # clear of earnings -> pass
     assert risk_gate.evaluate(base_ctx(days_to_earnings=3)).checks["earnings_proximity"]
-    assert not risk_gate.evaluate(base_ctx(days_to_earnings=None)).approved
 
 
 # ------------------------------------------------------------- chokepoint / bypass
@@ -328,7 +331,7 @@ def test_gap_through_stop():
 def _candidate(symbol="AAA", sector="Technology", lane="turnaround"):
     return {"symbol": symbol, "entry": 3.0, "stop": 2.7, "target": 3.6, "sector": sector,
             "lane": lane, "quality": 8.0, "avg_dollar_vol": 5_000_000.0, "direction": "long",
-            "days_to_earnings": 10}
+            "days_to_earnings": 10, "earnings_available": True}
 
 
 def test_executor_halted_refuses_batch():
@@ -584,7 +587,7 @@ def test_unknown_earnings_refusal_is_logged():
     db, path = fresh_db()
     try:
         cfg = make_config(); alp = FakeAlpaca(100000, cfg); rm = RiskManager(cfg)
-        cand = _candidate("AAA"); cand["days_to_earnings"] = None      # unknown -> fail closed
+        cand = _candidate("AAA"); cand["earnings_available"] = False    # fetch failed -> unknown
         out = order_executor.execute_candidates(db, alp, rm, cfg, [cand])
         assert out["placed"] == 0 and out["refused"] == 1
         assert out["results"][0]["refusal_reason"] == "unknown_earnings"
@@ -593,6 +596,19 @@ def test_unknown_earnings_refusal_is_logged():
         # deduped per symbol+lane+reason+day -> a second scan of the same name doesn't double-count
         order_executor.execute_candidates(db, alp, rm, cfg, [cand])
         assert db.refusal_counts(7).get("unknown_earnings") == 1
+    finally:
+        _rm(path)
+
+
+def test_no_upcoming_earnings_is_safe_and_places():
+    # searched calendar, no upcoming earnings -> NOT unknown -> should PLACE
+    db, path = fresh_db()
+    try:
+        cfg = make_config(); alp = FakeAlpaca(100000, cfg); rm = RiskManager(cfg)
+        cand = _candidate("AAA"); cand["earnings_available"] = True; cand["days_to_earnings"] = None
+        out = order_executor.execute_candidates(db, alp, rm, cfg, [cand])
+        assert out["placed"] == 1, out
+        assert db.refusal_counts(7).get("unknown_earnings", 0) == 0
     finally:
         _rm(path)
 

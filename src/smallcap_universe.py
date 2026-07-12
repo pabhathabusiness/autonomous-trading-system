@@ -404,7 +404,12 @@ def enrich_symbol(db: Database, fh: FinnhubClient, symbol: str,
         "beta": r52["beta"],
         "reverse_split": ss.reverse_split_flags(splits),
         "dilution_forms": dil_forms,
-        "days_to_earnings": dte,         # None => UNKNOWN (B3 earnings guard fails closed)
+        "days_to_earnings": dte,         # int, or None (no upcoming date OR fetch failed)
+        # earnings_available distinguishes the two None cases (the silent-substitution
+        # trap): True = the calendar was SEARCHED (so days_to_earnings None means "no
+        # upcoming earnings" -> SAFE to trade); False = the fetch failed -> UNKNOWN ->
+        # the B3 earnings guard fails closed.
+        "earnings_available": earn is not None,
         "fetch_status": fetch_status,
         "stage2_enriched": bool(stage2),
     }

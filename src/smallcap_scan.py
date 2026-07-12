@@ -43,6 +43,7 @@ def _algo_candidate(trigger: dict[str, Any], avg_dollar_vol: Optional[float]) ->
         "price_tier": trigger.get("price_tier"), "hold_band": trigger.get("band"),
         "rel_vol": trigger.get("rel_vol"), "strategy": "smallcap",
         "days_to_earnings": trigger.get("days_to_earnings"),   # B3 earnings guard
+        "earnings_available": trigger.get("earnings_available"),
     }
 
 

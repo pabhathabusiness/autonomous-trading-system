@@ -364,6 +364,7 @@ def eval_lane(lane: str, row: dict[str, Any], scores: dict[str, float],
         "float_est": row.get("float_est"), "so_proxy": row.get("so_proxy"),
         "rel_vol": row.get("rel_vol"), "sector_name": row.get("sector_name"),
         "days_to_earnings": sig.get("days_to_earnings"),   # B3 earnings guard input
+        "earnings_available": bool(sig.get("earnings_available")),
         "dilution_risk": row.get("dilution_risk"), "coiled_state": state,
         "demand_signals": gate_tags if lane == "reversal" else [],
         "catalyst": sig.get("catalyst"), "chips": chips,

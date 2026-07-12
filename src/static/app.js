@@ -675,7 +675,7 @@ async function loadMarketOverview() {
 
 // ============ Lane 4: weekly bias strip + regime + news drawer ============
 let mbiasPanel = null;
-const bArrow = (b) => b === 'bullish' ? '<span class="pos">▲</span>' : b === 'bearish' ? '<span class="neg">▼</span>' : '<span class="muted">·</span>';
+const bArrow = (b) => b === 'bullish' ? '<span class="pos">▲</span>' : b === 'bearish' ? '<span class="neg">▼</span>' : b === 'unknown' ? '<span class="muted" title="data unavailable — not a market view">—</span>' : '<span class="muted">·</span>';
 
 async function loadMarketBias() {
   const el = $("mbias-strip"); if (!el) return;
@@ -684,7 +684,9 @@ async function loadMarketBias() {
     mbiasPanel = d;
     const reg = $("mbias-regime");
     if (reg) reg.innerHTML = d.regime
-      ? `regime: <b class="${d.regime === 'risk_on' ? 'pos' : d.regime === 'risk_off' ? 'neg' : ''}">${d.regime}</b> · ${d.mag7_bullish ?? '—'}/7 Mag7 bullish ${d.stale ? '· <span class="neg">stale</span>' : ''}`
+      ? (d.regime === 'unknown'
+          ? `<span class="neg">⚠ regime unavailable</span> — ${d.unknown_inputs ?? '?'} inputs missing (data pipeline degraded, not a market call)`
+          : `regime: <b class="${d.regime === 'risk_on' ? 'pos' : d.regime === 'risk_off' ? 'neg' : ''}">${d.regime}</b> · ${d.mag7_bullish ?? '—'}/7 Mag7 bullish ${d.stale ? '· <span class="neg">stale</span>' : ''}`)
       : 'no panel yet — refreshes on the next engine tick';
     if (!d.indexes || !d.indexes.length) { el.innerHTML = '<p class="muted">Panel populates on the engine’s next tick (~daily refresh).</p>'; return; }
     const chip = (r, kind) => `<button class="chip bchip" onclick="openDrawer('${kind}','${r.symbol}')">

@@ -200,14 +200,27 @@ def reconcile_open_fills(db, alpaca, *, account_type: str = "algo") -> dict[str,
             continue
         entry_fill = t.get("fill_price")
         filled_qty = t.get("filled_qty")
-        if entry_fill is None:
+        stored_q = filled_qty or 0.0
+        try:
+            order_q = float(order.get("filled_qty") or 0)
+        except (TypeError, ValueError):
+            order_q = 0.0
+        # TRUE-UP the entry whenever the broker shows MORE filled than we've stored
+        # (a partial that grew, or the completion) -- and on the first capture. A
+        # partial FIRST snapshot must NOT pin filled_qty low: sum_open_risk +
+        # per-lane notional use COALESCE(filled_qty, shares), so a frozen-low qty
+        # silently under-counts the 5% / 30% caps and compute_real_close would skew
+        # real_pnl. Converges fill_price + filled_qty to the final full-fill values;
+        # no churn once nothing grows. (adversarial BLOCKER fix)
+        if filled_qty is None or order_q > stored_q:
             f = fill_recorder.record_open_fill(
                 db, t["id"], order, planned_entry=t.get("entry_price"),
                 requested_qty=t.get("shares"), submitted_at=t.get("submitted_at"))
             if f.get("fill_price") is not None:
+                if entry_fill is None:
+                    entry_n += 1
                 entry_fill = f["fill_price"]
-                filled_qty = f.get("filled_qty", filled_qty)   # use the REAL filled qty
-                entry_n += 1
+                filled_qty = f.get("filled_qty", filled_qty)
         # real EXIT leg -> record + close (once; gate on exit_fill_price is None)
         if entry_fill is not None and t.get("exit_fill_price") is None:
             found = fill_recorder.find_filled_exit_leg(order)

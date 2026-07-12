@@ -78,10 +78,13 @@ def parse_fill(order: Optional[dict[str, Any]], *, planned_entry: Optional[float
     if is_error(order):
         return {"was_rejected": 1, "order_status": "rejected"}
     status = (order.get("status") or "").lower()
-    out: dict[str, Any] = {"order_status": status,
-                           "was_rejected": 1 if status in _REJECT else 0}
     filled_qty = _f(order.get("filled_qty")) or 0.0
     fill_price = _f(order.get("filled_avg_price"))
+    # A partial-then-CANCELED order still HOLDS the filled shares -- that's a fill,
+    # not a rejection. was_rejected only when NOTHING filled, else the live partial
+    # position would drop out of the open-risk / per-lane caps. (adversarial fix)
+    out: dict[str, Any] = {"order_status": status,
+                           "was_rejected": 1 if (status in _REJECT and filled_qty <= 0) else 0}
     if fill_price is None or filled_qty <= 0:
         return out                       # not filled yet -- nothing to record
     out["fill_price"] = fill_price

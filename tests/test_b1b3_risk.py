@@ -440,6 +440,60 @@ def test_reconcile_exit_leg_closes_with_real_and_sim():
         _rm(path)
 
 
+def test_reconcile_partial_then_complete_trues_up():
+    # adversarial BLOCKER: a partial FIRST fill must not pin filled_qty low -- it
+    # must true up (price + qty) when the entry completes, or the caps under-count.
+    db, path = fresh_db()
+    try:
+        cfg = make_config()
+        alp = FakeAlpaca(100000, cfg)
+        rm = RiskManager(cfg)
+        order_executor.execute_candidates(db, alp, rm, cfg, [_candidate("AAA")])
+        N = int(db.get_open_algo_trades("algo")[0]["shares"])
+        half = N // 2
+        rps = abs(3.0 - 2.7)                                     # risk per share
+        # cycle 1: partial fill (half)
+        alp._fills = {"ord-AAA": {"id": "ord-AAA", "status": "partially_filled",
+                                  "filled_qty": str(half), "filled_avg_price": "3.01",
+                                  "submitted_at": "2026-07-12T14:30:00Z"}}
+        order_executor.reconcile_open_fills(db, alp)
+        assert db.get_open_algo_trades("algo")[0]["filled_qty"] == float(half)
+        assert abs(db.sum_open_risk("algo") - rps * half) < 1e-6
+        # cycle 2: completes to full N -> MUST true up (not stay pinned at half)
+        alp._fills = {"ord-AAA": {"id": "ord-AAA", "status": "filled", "filled_qty": str(N),
+                                  "filled_avg_price": "3.02", "submitted_at": "2026-07-12T14:30:00Z",
+                                  "filled_at": "2026-07-12T14:30:05Z"}}
+        order_executor.reconcile_open_fills(db, alp)
+        row = db.get_open_algo_trades("algo")[0]
+        assert row["filled_qty"] == float(N), row["filled_qty"]  # qty trued up
+        assert row["fill_price"] == 3.02                         # price trued up
+        assert abs(db.sum_open_risk("algo") - rps * N) < 1e-6    # caps see the FULL qty
+    finally:
+        _rm(path)
+
+
+def test_partial_then_canceled_still_counts_in_caps():
+    # adversarial adjacent hole: a partial-then-canceled entry still HOLDS the
+    # filled shares -> must stay in the caps, not be marked rejected and dropped.
+    db, path = fresh_db()
+    try:
+        cfg = make_config()
+        alp = FakeAlpaca(100000, cfg)
+        rm = RiskManager(cfg)
+        order_executor.execute_candidates(db, alp, rm, cfg, [_candidate("AAA")])
+        N = int(db.get_open_algo_trades("algo")[0]["shares"])
+        half = N // 2
+        alp._fills = {"ord-AAA": {"id": "ord-AAA", "status": "canceled", "filled_qty": str(half),
+                                  "filled_avg_price": "3.01", "submitted_at": "2026-07-12T14:30:00Z"}}
+        order_executor.reconcile_open_fills(db, alp)
+        rows = db.get_open_algo_trades("algo")
+        assert rows, "partial-then-canceled must NOT drop out of the caps"
+        assert not rows[0]["was_rejected"] and rows[0]["filled_qty"] == float(half)
+        assert abs(db.sum_open_risk("algo") - abs(3.0 - 2.7) * half) < 1e-6
+    finally:
+        _rm(path)
+
+
 def test_orphan_recovery_on_submit_error():
     db, path = fresh_db()
     try:

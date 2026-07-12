@@ -79,8 +79,8 @@ _LANE_META = {
     "breakout":          {"float_ceiling": 500, "price_tiers": ("special", "low", "sub2"), "bands": ("short", "medium"),    "hard": (), "gate": "breakout"},
     "compression":       {"float_ceiling": 300, "price_tiers": ("special", "low", "sub2"), "bands": ("short", "medium"),    "hard": (), "gate": None},
     "emerging_strength": {"float_ceiling": 500, "price_tiers": ("special", "low", "sub2"), "bands": ("medium", "position"), "hard": (), "gate": None},
-    "hidden_value":      {"float_ceiling": 500, "price_tiers": ("special", "low"),         "bands": ("medium", "position"), "hard": (), "gate": None, "require_available": ("fundamental",)},
-    "turnaround":        {"float_ceiling": 500, "price_tiers": ("special", "low"),         "bands": ("position", "medium"), "hard": (), "gate": None, "require_available": ("fundamental",)},
+    "hidden_value":      {"float_ceiling": 500, "price_tiers": ("special", "low"),         "bands": ("medium", "position"), "hard": (), "gate": None, "require_available": ("fundamental", "insider")},
+    "turnaround":        {"float_ceiling": 500, "price_tiers": ("special", "low"),         "bands": ("position", "medium"), "hard": (), "gate": None, "require_available": ("fundamental", "insider", "catalyst")},
 }
 _BANDS = {  # band -> (rr_floor, time_stop_days, atr_stop_mult, atr_target_mult)
     "overnight": (1.8, 2, 0.6, 1.5), "short": (2.0, 5, 1.0, 2.0),

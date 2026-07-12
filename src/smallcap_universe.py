@@ -32,6 +32,7 @@ import pandas as pd
 from src.database import Database
 from src.finnhub_client import FinnhubClient
 from src import smallcap_signals as ss
+from src import smallcap_edges as edges
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,7 @@ _DILUTION_FORMS = ("S-3", "S-1", "424B", "ATM")
 _ALLOWED_MICS = {"XNAS", "XNYS", "XASE", "ARCX", "BATS"}   # NASDAQ/NYSE/AMEX family
 _PROFILE_TTL_S = 7 * 24 * 3600
 _FIN_TTL_S = 3 * 24 * 3600
+_INSIDER_TTL_S = 3 * 24 * 3600     # A4 P11 cache budget
 _SYMBOLS_TTL_S = 7 * 24 * 3600
 _SYMBOLS_KEY = "sc:us_symbols"
 
@@ -271,16 +273,30 @@ def enrich_symbol(db: Database, fh: FinnhubClient, symbol: str,
 
     filings = _cached(db, f"sc:filings:{symbol}", _FIN_TTL_S, lambda: fh.filings(symbol, 180))
     dilution_risk, dil_forms = dilution_from_filings(filings)
-    metric = (_cached(db, f"sc:fin:{symbol}", _FIN_TTL_S, lambda: fh.basic_financials(symbol)) or {}).get("metric", {})
-    news = fh.company_news(symbol, days=2)
+    bf = _cached(db, f"sc:fin:{symbol}", _FIN_TTL_S, lambda: fh.basic_financials(symbol)) or {}
+    metric = bf.get("metric", {}) or {}
+    series = bf.get("series", {}) or {}
+    news = fh.company_news(symbol, days=7)
     now_ts = datetime.now(timezone.utc).timestamp()
     catalyst = catalyst_from_news(news, now_ts, 48)
+    # A4: classify news polarity (offering/going_concern are NOT positive catalysts)
+    news_class = edges.classify_news(news, now_ts, window_days=7)
+    txns = _cached(db, f"sc:insider:{symbol}", _INSIDER_TTL_S, lambda: fh.insider_transactions(symbol))
+    insider = edges.insider_score((txns or {}).get("data") if isinstance(txns, dict) else None)
+    r52 = edges.range52_beta(metric, price)
 
     signals_blob = {
         "ohlc": sig,
         "demand_trend": demand_trend_features(df),
         "fundamentals": value_fundamentals(metric, so_m),
         "catalyst": catalyst,
+        "catalyst_class": {"weight": news_class["weight"], "type": news_class["type"]},
+        "going_concern": news_class["going_concern"],
+        "insider": insider,
+        "fundamental_trends": {"revenue_trend": edges.revenue_trend(series)},
+        "pct_of_52w_range": r52["pct_of_52w_range"],
+        "pct_from_52w_high": r52["pct_from_52w_high"],
+        "beta": r52["beta"],
         "reverse_split": ss.reverse_split_flags(splits),
         "dilution_forms": dil_forms,
     }

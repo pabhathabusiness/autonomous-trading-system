@@ -107,6 +107,25 @@ class FinnhubClient:
                                             "from": (to - timedelta(days=days)).isoformat(),
                                             "to": to.isoformat()})
 
+    def insider_transactions(self, symbol: str, days: int = 180) -> Optional[dict[str, Any]]:
+        """Open-market + comp insider txns (free tier, A4 P2). Filter to code 'P'
+        in the scorer. Returns {'data': [...], 'symbol': ..}."""
+        to = date.today()
+        return self._get("/stock/insider-transactions", {"symbol": symbol.upper(),
+                         "from": (to - timedelta(days=days)).isoformat(), "to": to.isoformat()})
+
+    def earnings_surprise(self, symbol: str) -> Optional[list[dict[str, Any]]]:
+        """Actual vs estimate EPS history (free tier). beat_streak / avg_surprise."""
+        return self._get("/stock/earnings", {"symbol": symbol.upper()})
+
+    def recommendation(self, symbol: str) -> Optional[list[dict[str, Any]]]:
+        """Analyst buy/hold/sell counts over time (free; price-target is premium)."""
+        return self._get("/stock/recommendation", {"symbol": symbol.upper()})
+
+    def peers(self, symbol: str) -> Optional[list[str]]:
+        """Real peer set for relative valuation (free tier)."""
+        return self._get("/stock/peers", {"symbol": symbol.upper()})
+
     def us_symbols(self) -> Optional[list[dict[str, Any]]]:
         """All US-listed symbols (reference data, free tier). Each item has
         symbol/type/mic/description; the universe builder filters to common

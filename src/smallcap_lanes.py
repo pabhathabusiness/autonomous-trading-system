@@ -193,13 +193,17 @@ def _penalties(row: dict[str, Any]) -> tuple[float, list[str]]:
     selling (T2)."""
     sig = row.get("signals") or {}
     pts, chips = 0.0, []
-    if (sig.get("delisting_risk") or row.get("dilution_risk")) and False:
-        pass
-    if (sig.get("delisting_risk")) and row.get("price_tier") != "deep":
+    if sig.get("delisting_risk") and row.get("price_tier") != "deep":
         pts -= 1.5
         chips.append("DELISTING RISK")
-    ins = sig.get("insider") or {}
-    if ins.get("net_dollars", 0) and ins.get("net_dollars", 0) < 0 and ins.get("heavy_selling"):
+    # A4 3.1: negative-polarity headline (offering/miss/delisting). The catalyst
+    # family already zeroes it; this is the extra composite drag -- the live bug fix.
+    cw = (sig.get("catalyst_class") or {}).get("weight", 0.0) or 0.0
+    if cw < 0:
+        pts += cw
+        ct = (sig.get("catalyst_class") or {}).get("type")
+        chips.append("OFFERING" if ct == "offering" else "NEWS NEG")
+    if (sig.get("insider") or {}).get("heavy_selling"):
         pts -= 0.5
         chips.append("INSIDER SELLING")
     return pts, chips
@@ -256,6 +260,15 @@ def eval_lane(lane: str, row: dict[str, Any], families: dict[str, float],
         chips.append("COILED")
     if row.get("dilution_risk"):
         chips.append("DILUTION")
+    ins = sig.get("insider") or {}
+    if ins.get("cluster") or ins.get("score", 0) >= 0.7:
+        n, dollars, ago = ins.get("buyers_distinct", 0), ins.get("net_dollars", 0), ins.get("last_buy_days_ago")
+        chips.append(f"INSIDER BUY {n}·${int(dollars/1000)}k·{ago}d" if dollars else "INSIDER BUY")
+    if (sig.get("fundamental_trends") or {}).get("revenue_trend") == "accelerating":
+        chips.append("REV ACCEL")
+    ct = (sig.get("catalyst_class") or {}).get("type")
+    if ct in ("contract_award", "regulatory_win", "earnings_beat"):
+        chips.append(ct.replace("_", " ").upper())
     if lane == "coiled" and not row.get("compression_extreme"):
         state = "WATCHING"
     elif lane == "coiled":

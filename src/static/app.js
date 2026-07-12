@@ -576,20 +576,32 @@ async function loadSectorBoard() {
   } catch (e) { $("board-strong").innerHTML = `<p class="muted">${e.message}</p>`; }
 }
 
+function setupChip(t) {
+  return t.legacy ? '<span class="chip chip-legacy" title="opened before the grading path existed">legacy</span>'
+    : `<span class="chip chip-arch">${archLabel(t.archetype)}</span>`;
+}
+function gradeBadge(t, small) {
+  const sm = small ? ' sm' : '';
+  if (t.legacy) return `<span class="grade${sm} g-L" title="legacy trade — pre-grading">L</span>`;
+  return `<span class="grade${sm} ${gradeClass(t.process_grade)}" title="${t.process_grade || ''} — ${t.process_notes || ''}">${gradeText(t.process_grade)}</span>`;
+}
+
 function ideaRow(t) {
   const live = liveIndex[t.symbol];
   const lp = live ? live.live_price : null, pnl = live ? live.live_pnl_pct : null;
-  const sub = lp != null ? `live ${price(lp)}${pnl != null ? ' · ' + pct(pnl, 1) : ''}`
-    : (t.edges_fired || "").split(", ").slice(0, 3).join(" · ");
+  // full trade at a glance: the plan (entry → stop / target) + the live line
+  const planLine = `${price(t.entry_price)} → ${price(t.stop_loss)} / ${price(t.target_price)}`;
+  const liveLine = lp != null ? ` · live ${price(lp)}${pnl != null ? ' ' + pct(pnl, 1) : ''}` : '';
   return `<div class="idea" onclick="openTrade(${t.id})">
     <span class="i-tk">${t.symbol}${t.direction === 'short' ? ' <span class="short-tag">▼</span>' : ''}</span>
     <div class="i-mid"><div class="i-chips">
-        <span class="chip chip-arch">${archLabel(t.archetype)}</span>
+        ${setupChip(t)}
         <span class="chip chip-tf">${bandLabel(t.timeframe_band)}</span>
-        <span class="chip chip-strat">${t.strategy}</span></div>
-      <span class="i-sub muted">${sub}</span></div>
-    <div class="i-rr"><div class="v">${num(t.planned_rr || t.risk_reward, 1)}:1</div><div class="l">R:R</div></div>
-    <div class="grade ${gradeClass(t.process_grade)}" title="${t.process_grade || ''} — ${t.process_notes || ''}">${gradeText(t.process_grade)}</div>
+        <span class="chip chip-strat">${t.strategy}</span>
+        ${t.quality_score != null ? `<span class="chip chip-q">${num(t.quality_score, 1)}/10</span>` : ''}</div>
+      <span class="i-sub muted">${planLine}${liveLine}</span></div>
+    <div class="i-rr"><div class="v">${num(t.risk_reward, 1)}:1</div><div class="l">R:R</div></div>
+    ${gradeBadge(t, false)}
   </div>`;
 }
 
@@ -606,19 +618,22 @@ function renderTrackRecord(d) {
   const trades = d.trades || [];
   const sm = $("track-summary");
 
-  // summary scorecards from CLOSED trades (outcome is real; process is graded)
-  const closed = trades.filter(t => t.status === 'closed');
+  // Scorecards measure the FINISHED system only: legacy rows (opened before the
+  // grading path existed) are shown in the table but excluded from the stats.
+  const graded = trades.filter(t => !t.legacy);
+  const closed = graded.filter(t => t.status === 'closed');
   const wins = closed.filter(t => t.outcome === 'win').length;
   const rVals = closed.map(t => t.r_multiple).filter(v => v != null);
   const avgR = rVals.length ? rVals.reduce((a, b) => a + b, 0) / rVals.length : null;
   const totalPnl = closed.reduce((a, t) => a + (t.pnl_usd || 0), 0);
   const winRate = closed.length ? 100 * wins / closed.length : null;
   const dist = { A: 0, B: 0, C: 0, D: 0, F: 0, UG: 0 };
-  trades.forEach(t => { const g = t.process_grade === 'UNGRADED' ? 'UG' : t.process_grade; if (g in dist) dist[g]++; });
+  graded.forEach(t => { const g = t.process_grade === 'UNGRADED' ? 'UG' : t.process_grade; if (g in dist) dist[g]++; });
+  const legacyN = d.legacy ?? trades.filter(t => t.legacy).length;
 
   const cards = $("track-cards");
   if (cards) cards.innerHTML = `
-    <div class="scard"><div class="big">${trades.length}</div><div class="lbl">trades logged</div></div>
+    <div class="scard"><div class="big">${graded.length}</div><div class="lbl">graded trades</div></div>
     <div class="scard"><div class="big">${winRate != null ? num(winRate, 0) + '%' : '—'}</div><div class="lbl">win rate (${closed.length} closed)</div></div>
     <div class="scard"><div class="big ${(avgR ?? 0) >= 0 ? 'pos' : 'neg'}">${avgR != null ? signed(avgR, 2) + 'R' : '—'}</div><div class="lbl">avg R-multiple</div></div>
     <div class="scard"><div class="big ${totalPnl >= 0 ? 'pos' : 'neg'}">${money(totalPnl, 0)}</div><div class="lbl">realized P&L</div></div>
@@ -626,7 +641,8 @@ function renderTrackRecord(d) {
       ${['A', 'B', 'C', 'D', 'F', 'UG'].map(g => `<span class="gpill ${g === 'UG' ? 'g-U' : 'g-' + g}">${g} ${dist[g]}</span>`).join("")}
     </div><div class="lbl">process grades</div></div>`;
 
-  if (sm) sm.textContent = `${d.count} trades · ${d.graded} graded · ${d.ungraded} ungraded — autofills after each execution`;
+  if (sm) sm.textContent = `${graded.length} graded · ${d.ungraded} ungraded` +
+    (legacyN ? ` · ${legacyN} legacy (pre-grading, excluded from stats)` : '') + ' — autofills after each trade';
   if (!trades.length) { el.innerHTML = '<p class="muted">No algo trades yet — rows appear here automatically as the engine takes trades.</p>'; return; }
 
   el.innerHTML = `<table class="track"><thead><tr>
@@ -644,12 +660,12 @@ function renderTrackRecord(d) {
       return `<tr class="jrow" onclick="openTrade(${t.id})">
         <td class="muted nowrap">${(t.entry_date || '').slice(0, 10)}</td>
         <td><strong>${t.symbol}</strong>${t.direction === 'short' ? ' <span class="short-tag">▼</span>' : ''}</td>
-        <td>${archLabel(t.archetype)}</td>
+        <td>${t.legacy ? '<span class="chip chip-legacy">legacy</span>' : archLabel(t.archetype)}</td>
         <td class="muted">${bandLabel(t.timeframe_band)}</td>
         <td class="muted nowrap">${price(t.entry_price)} → ${price(t.stop_loss)} / ${price(t.target_price)}</td>
-        <td>${num(t.planned_rr || t.risk_reward, 1)}:1</td>
-        <td><span class="grade sm ${gradeClass(t.process_grade)}" title="${t.process_grade || ''}">${gradeText(t.process_grade)}</span></td>
-        <td class="feedback muted">${t.process_notes || '—'}</td>
+        <td>${num(t.risk_reward, 1)}:1</td>
+        <td>${gradeBadge(t, true)}</td>
+        <td class="feedback muted">${t.legacy ? '<span class="muted">— pre-grading —</span>' : (t.process_notes || '—')}</td>
         <td>${outcome}</td>
         <td class="pnlcol">${rpnl}</td>
       </tr>`;
@@ -704,16 +720,18 @@ function openTrade(id) {
       <div class="p p-t"><div class="l">Target</div><div class="v">${price(t.target_price)}</div></div>
     </div>
     <div class="d-kv" style="margin-top:12px">
-      <div class="cell"><div class="l">Archetype</div><div class="v">${archLabel(t.archetype)}</div></div>
-      <div class="cell"><div class="l">Timeframe band</div><div class="v">${bandLabel(t.timeframe_band)}</div></div>
-      <div class="cell"><div class="l">R:R</div><div class="v">${num(t.planned_rr || t.risk_reward, 1)}:1</div></div>
+      <div class="cell"><div class="l">Setup</div><div class="v">${t.legacy ? 'legacy (pre-grading)' : archLabel(t.archetype)}</div></div>
+      <div class="cell"><div class="l">Timeframe band</div><div class="v">${bandLabel(t.timeframe_band) || '—'}</div></div>
+      <div class="cell"><div class="l">R:R</div><div class="v">${num(t.risk_reward, 1)}:1</div></div>
+      <div class="cell"><div class="l">Quality</div><div class="v">${t.quality_score != null ? num(t.quality_score, 1) + '/10' : '—'}</div></div>
       <div class="cell"><div class="l">RS vs SPY</div><div class="v ${(t.rs_vs_spy ?? 0) >= 0 ? 'pos' : 'neg'}">${t.rs_vs_spy != null ? pct(t.rs_vs_spy, 1) : '—'}</div></div>
-      <div class="cell"><div class="l">Process grade</div><div class="v">${t.process_grade || '—'} ${t.process_score != null ? '(' + t.process_score + ')' : ''}</div></div>
+      <div class="cell"><div class="l">Process grade</div><div class="v">${t.legacy ? 'legacy' : (t.process_grade || '—') + (t.process_score != null ? ' (' + t.process_score + ')' : '')}</div></div>
       <div class="cell"><div class="l">Status</div><div class="v">${t.status}${t.outcome ? ' · ' + t.outcome : ''}${t.r_multiple != null ? ' · ' + signed(t.r_multiple, 2) + 'R' : ''}</div></div>
     </div>
-    <div class="d-block"><h4>Process notes</h4><p class="muted">${t.process_notes || '—'}</p>
-      <div class="flagwrap">${flags.map(f => `<span class="flag">${f}</span>`).join("")}</div></div>
+    ${t.legacy ? '' : `<div class="d-block"><h4>Process notes</h4><p class="muted">${t.process_notes || '—'}</p>
+      <div class="flagwrap">${flags.map(f => `<span class="flag">${f}</span>`).join("")}</div></div>`}
     <div class="d-block"><h4>Confluences</h4><p class="muted">${(t.edges_fired || '—').split(", ").join(" · ")}</p></div>
+    ${t.reasoning ? `<div class="d-block"><h4>Rationale</h4><p class="muted">${t.reasoning}</p></div>` : ''}
     ${live ? `<div class="d-block"><h4>Live</h4><p>${price(live.live_price)} ${ageLabel(live.age_seconds)} ·
       <span class="${(live.live_pnl_pct ?? 0) >= 0 ? 'pos' : 'neg'}">${pct(live.live_pnl_pct, 1)}</span> ·
       to stop ${pct(live.dist_to_stop_pct, 1)} / to target ${pct(live.dist_to_target_pct, 1)}</p></div>` : ''}`;

@@ -137,7 +137,7 @@ def generate_short_term_ideas(
     count = st_cfg.get("main_count", 10)
     max_price = st_cfg.get("main_max_price", 100)
     min_edges = st_cfg.get("main_min_edges", 2)
-    min_rr = st_cfg.get("main_min_risk_reward", 1.2)
+    min_rr = st_cfg.get("main_min_risk_reward", 1.5)  # quality gate (was 1.2)
 
     # symbol -> sector (first sector wins), deduped across hot sectors
     symbol_sector: dict[str, str] = {}
@@ -209,7 +209,7 @@ def generate_downside_ideas(
     threshold = ds_cfg.get("sector_threshold", 0.0)
     count = ds_cfg.get("count", 8)
     min_edges = ds_cfg.get("min_edges", 5)
-    min_rr = ds_cfg.get("min_risk_reward", 1.3)
+    min_rr = ds_cfg.get("min_risk_reward", 1.5)  # quality gate (was 1.3)
     max_price = ds_cfg.get("max_price", 200)
     max_sectors = ds_cfg.get("max_sectors", 5)
 
@@ -285,6 +285,7 @@ def generate_coiling_ideas(
         return 0
     count = c_cfg.get("count", 10)
     max_price = c_cfg.get("max_price", 200)
+    min_rr = c_cfg.get("min_risk_reward", 1.5)  # quality gate -- coiling had NO floor before
 
     symbol_sector: dict[str, str] = {}
     for sector in list(hot_sectors) + list(turning_sectors):
@@ -295,6 +296,8 @@ def generate_coiling_ideas(
     for symbol, sector in symbol_sector.items():
         a = TECH.analyze_coiling(symbol)
         if not a or not a["is_coiling"] or a["entry_price"] > max_price:
+            continue
+        if a["risk_reward"] < min_rr:  # close the back door: enforce the R:R gate
             continue
         a["sector_name"] = sector
         coils.append(a)
@@ -743,11 +746,25 @@ def get_bias_strip() -> dict[str, Any]:
 @app.get("/api/log/algo")
 def get_algo_log(status: Optional[str] = None) -> dict[str, Any]:
     """Autonomous Algo book (Log B): every scanner-opened trade with its process
-    grade + classification, newest first. `open` / `closed` filterable."""
-    trades = [t for t in DB.get_paper_trades(status=status) if (t.get("book") or "algo") == "algo"]
+    grade + classification, newest first. `open` / `closed` filterable. Each row
+    is enriched from its originating proposal so R:R / quality / edges / rationale
+    are present even on legacy rows that predate the grade columns."""
+    trades = DB.get_algo_trades(status=status)
+    for t in trades:
+        # display R:R: the trade's own planned_rr, else the proposal's R:R
+        t["risk_reward"] = t.get("planned_rr") if t.get("planned_rr") is not None \
+            else t.get("proposal_risk_reward")
+        t["quality_score"] = t.get("proposal_quality_score")
+        if not t.get("edges_fired"):
+            t["edges_fired"] = t.get("proposal_edges_fired")
+        t["reasoning"] = t.get("proposal_reasoning")
+        # legacy = opened before the grading path existed (no grade recorded)
+        t["legacy"] = t.get("process_grade") is None
     graded = sum(1 for t in trades if t.get("process_grade") and t["process_grade"] != "UNGRADED")
     ungraded = sum(1 for t in trades if t.get("process_grade") == "UNGRADED")
-    return {"count": len(trades), "graded": graded, "ungraded": ungraded, "trades": trades}
+    legacy = sum(1 for t in trades if t["legacy"])
+    return {"count": len(trades), "graded": graded, "ungraded": ungraded,
+            "legacy": legacy, "trades": trades}
 
 
 if STATIC_DIR.exists():

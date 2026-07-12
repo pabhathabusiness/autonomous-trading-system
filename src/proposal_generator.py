@@ -70,9 +70,10 @@ class ProposalGenerator:
         max_per_sector = account_cfg.get("max_per_sector", 5)
         max_total = account_cfg.get("max_total_proposals", 20)
         preferred_max = account_cfg.get("preferred_max_price")
-        # never propose a trade that risks more than it can make, no matter
-        # how many edges align (buying into overhead resistance).
-        min_risk_reward = account_cfg.get("min_risk_reward", 1.0)
+        # Swing is the longest hold and ties up capital longest, so it must
+        # demand the best reward: floor 2.0 (a 50% win rate at 2:1 is solidly
+        # profitable after costs). This is the quality GATE, not the edge logic.
+        min_risk_reward = account_cfg.get("min_risk_reward", 2.0)
 
         regime_name = market_regime.get("regime")
         if regime_name == "BEAR" and account_cfg.get("pause_new_entries_on_bear", False):

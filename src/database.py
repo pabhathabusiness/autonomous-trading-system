@@ -466,6 +466,30 @@ class Database:
         with self._conn() as conn:
             return [dict(r) for r in conn.execute(query, params).fetchall()]
 
+    def get_algo_trades(self, status: Optional[str] = None) -> list[dict[str, Any]]:
+        """Algo-book trades LEFT-JOINed to their originating proposal (via
+        proposal_id), so the dashboard shows the same rich detail the proposal
+        table already has -- R:R, quality, edges, written rationale -- even for
+        legacy rows that predate the paper-trade grade/rr columns."""
+        query = """
+            SELECT pt.*,
+                   p.risk_reward   AS proposal_risk_reward,
+                   p.quality_score AS proposal_quality_score,
+                   p.edges_fired   AS proposal_edges_fired,
+                   p.num_edges     AS proposal_num_edges,
+                   p.reasoning     AS proposal_reasoning
+            FROM paper_trades pt
+            LEFT JOIN proposals p ON pt.proposal_id = p.id
+            WHERE (pt.book = 'algo' OR pt.book IS NULL)
+        """
+        params: list[Any] = []
+        if status:
+            query += " AND pt.status = ?"
+            params.append(status)
+        query += " ORDER BY pt.entry_date DESC"
+        with self._conn() as conn:
+            return [dict(r) for r in conn.execute(query, params).fetchall()]
+
     def close_paper_trade(self, trade_id: int, exit_price: float, return_pct: float,
                           outcome: str, status: str) -> None:
         with self._conn() as conn:

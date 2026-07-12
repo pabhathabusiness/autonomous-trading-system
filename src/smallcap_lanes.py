@@ -54,6 +54,18 @@ MIN_COVERAGE = 0.55
 LANE_REMAP = {"bounce": "reversal", "coiled": "compression", "value": "hidden_value"}
 LANE_DELETED = {"runner", "hailmary", "special"}   # -> legacy_<old>
 
+# GATE 2: a lane whose THESIS-CORE family is degraded is DISABLED -- an honest
+# empty tab beats a lane confidently mislabeling setups. A family is a lane's
+# thesis-core when the lane's whole premise depends on SEEING it: insider
+# accumulation + catalyst for turnaround; insider confirmation for hidden_value.
+# The chart-driven lanes have no degradable core (their families are ~always
+# fetched), so they are never auto-disabled.
+THESIS_CORE = {
+    "turnaround": ("insider", "catalyst"),
+    "hidden_value": ("insider",),
+}
+DEGRADE_THRESHOLD = 0.90
+
 _WEIGHTS = {
     "reversal":          {"volume": 2.0, "structure": 3.0, "compression": 1.0, "trend": 0.0, "fundamental": 0.5, "catalyst": 1.5, "sector": 1.0, "float": 1.0, "insider": 1.5},
     "breakout":          {"volume": 3.0, "structure": 3.0, "compression": 1.5, "trend": 2.0, "fundamental": 0.0, "catalyst": 1.5, "sector": 1.5, "float": 0.5, "insider": 0.0},
@@ -358,14 +370,50 @@ def eval_lane(lane: str, row: dict[str, Any], scores: dict[str, float],
     }
 
 
+def family_coverage(rows: list[dict[str, Any]]) -> dict[str, float]:
+    """Fraction of rows on which each family's DATA is AVAILABLE (fetched, not
+    fetch-failed). This is the input to lane_disable_status. (The caller decides
+    WHICH rows to measure over -- universe-wide today, shortlist once GATE 1 lands.)"""
+    if not rows:
+        return {f: 0.0 for f in EDGE_FAMILIES}
+    counts = {f: 0 for f in EDGE_FAMILIES}
+    for row in rows:
+        _, avail = compute_families(row)
+        for f in EDGE_FAMILIES:
+            if avail[f]:
+                counts[f] += 1
+    n = len(rows)
+    return {f: round(counts[f] / n, 4) for f in EDGE_FAMILIES}
+
+
+def lane_disable_status(coverage: dict[str, float],
+                        threshold: float = DEGRADE_THRESHOLD) -> dict[str, dict[str, Any]]:
+    """Which lanes are DISABLED because a thesis-core family is below `threshold`
+    coverage. Returns {lane: {disabled, reason, degraded}} for the disabled lanes."""
+    out: dict[str, dict[str, Any]] = {}
+    for lane, cores in THESIS_CORE.items():
+        degraded = {f: coverage.get(f, 0.0) for f in cores if coverage.get(f, 0.0) < threshold}
+        if degraded:
+            worst_f = min(degraded, key=degraded.get)
+            out[lane] = {
+                "disabled": True,
+                "reason": f"{worst_f} data unavailable ({degraded[worst_f] * 100:.0f}% coverage)",
+                "degraded": {f: round(c, 3) for f, c in degraded.items()},
+            }
+    return out
+
+
 def evaluate_all(row: dict[str, Any], *, sector_early: bool = False,
-                 sector_ps: Optional[list[float]] = None) -> list[dict[str, Any]]:
+                 sector_ps: Optional[list[float]] = None,
+                 disabled: frozenset = frozenset()) -> list[dict[str, Any]]:
     if _hard_pass(row):
         return []
     scores, avail = compute_families(row, sector_early=sector_early)
     pen_pts, pen_chips = _penalties(row)
     out = []
     for lane in LANES:
+        if lane in disabled:            # GATE 2: thesis-core family degraded -> lane off
+            continue
         t = eval_lane(lane, row, scores, avail, pen_pts, pen_chips)
         if t:
             if sector_early and "SECTOR EARLY" not in t["chips"]:
@@ -374,13 +422,16 @@ def evaluate_all(row: dict[str, Any], *, sector_early: bool = False,
     return out
 
 
-def best_composite(row: dict[str, Any], *, sector_early: bool = False) -> dict[str, Any]:
+def best_composite(row: dict[str, Any], *, sector_early: bool = False,
+                   disabled: frozenset = frozenset()) -> dict[str, Any]:
     """BUG-6 support: the best achievable composite per name even if it doesn't
     trigger, + which family is missing. Powers the never-blank 'below bar' view."""
     scores, avail = compute_families(row, sector_early=sector_early)
     pen_pts, _ = _penalties(row)
     best = {"composite": 0.0, "lane": None, "fired": [], "missing": None}
     for lane in LANES:
+        if lane in disabled:
+            continue
         if not _eligible(lane, row):
             continue
         if any(not avail.get(req) for req in _LANE_META[lane].get("require_available", ())):

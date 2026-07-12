@@ -105,9 +105,17 @@ def insider_score(txns: Optional[list[dict[str, Any]]], asof: Optional[datetime]
     out = {"score": 0.0, "cluster": False, "buyers_distinct": 0, "net_dollars": 0.0,
            "net_shares": 0.0, "last_buy_days_ago": None, "heavy_selling": False,
            "dropped_rows": 0, "available": False}
-    if not txns:
-        return out                              # no filings -> family UNAVAILABLE (BUG-5)
+    # GATE 2 -- fetch failure must NOT masquerade as signal absence:
+    #   txns is None  => the insider fetch failed / was rate-limited / never ran
+    #                    -> family UNAVAILABLE (excluded from numerator AND denominator).
+    #   txns == []    => we SEARCHED and there were no open-market buys
+    #                    -> family AVAILABLE with SCORE 0 (a real "no insider buying",
+    #                       stays in the denominator as a drag).
+    if txns is None:
+        return out                              # UNAVAILABLE (unknown, not "no activity")
     out["available"] = True
+    if not txns:
+        return out                              # searched-empty -> available, score 0.0
     cap_dollars = market_cap_m * 1e6 if market_cap_m else None
     buys, sells_dollars = [], 0.0
     for t in txns:

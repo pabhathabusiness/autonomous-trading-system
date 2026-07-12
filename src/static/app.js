@@ -1215,6 +1215,7 @@ async function loadSmallcaps() {
     ]);
     scCache = tr;
     renderScStatus(tr);
+    markScDisabledTabs();
     renderScSectorHeat(tr.sector_heat || {});
     renderScCoiled(uni.coiled || []);
     renderScDeathwatch(dw.deathwatch || []);
@@ -1250,6 +1251,17 @@ function scSetLane(lane) {
 function renderScCards() {
   const wrap = $("sc-cards");
   if ($("sc-thesis")) $("sc-thesis").textContent = SC_THESIS[scLane] || "";   // thesis on load, not just on tab-click
+  // GATE 2: a lane whose thesis-core family is degraded is DISABLED and says so
+  // plainly -- it does not masquerade as a quiet tape. It re-enables when coverage
+  // recovers. An honest empty tab beats a lane confidently mislabeling setups.
+  const status = (scCache.lane_status || {})[scLane];
+  if (status && status.disabled) {
+    wrap.innerHTML = `<div class="sc-disabled"><b>${SC_LANE_LABEL[scLane] || scLane} — disabled:</b> ` +
+      `${scEsc(status.reason || "thesis-core data unavailable")}.<br>` +
+      `This lane's thesis depends on data it currently can't see, so it is held rather than ` +
+      `place setups it can't actually verify. It re-enables automatically once coverage recovers.</div>`;
+    return;
+  }
   const all = scCache.triggers || [];
   const rows = scLane === "all" ? all : all.filter(t => t.lane === scLane);
   rows.sort((a, b) => (b.score || 0) - (a.score || 0));
@@ -1259,6 +1271,16 @@ function renderScCards() {
     return;
   }
   wrap.innerHTML = rows.map(scCard).join("");
+}
+
+function markScDisabledTabs() {
+  const ls = scCache.lane_status || {};
+  document.querySelectorAll(".sc-tab").forEach(t => {
+    const s = ls[t.dataset.lane];
+    const off = !!(s && s.disabled);
+    t.classList.toggle("sc-tab-disabled", off);
+    if (off) t.title = s.reason || "disabled";
+  });
 }
 
 function scChip(c) {

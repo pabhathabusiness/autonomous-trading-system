@@ -443,6 +443,12 @@ table.track .feedback { max-width: 230px; font-size: 12px; }
 .sc-tab.active { color: #fff; background: var(--grade); border-color: var(--grade); }
 .sc-tab-hm.active { background: #b7791f; border-color: #b7791f; }
 .sc-tab .sc-hint { font-weight: 400; opacity: .6; font-size: 11px; }
+/* GATE 2: a disabled lane (thesis-core data unavailable) reads as held, not quiet */
+.sc-tab-disabled { opacity: .45; text-decoration: line-through; }
+.sc-tab-disabled::after { content: " ◌"; text-decoration: none; }
+.sc-disabled { background: rgba(214,158,46,.10); border: 1px solid var(--amber, #d69e2e);
+  color: var(--amber, #d69e2e); border-radius: 10px; padding: 14px 16px; font-size: 13px;
+  line-height: 1.5; }
 .sc-hm-note { background: rgba(183,121,31,.12); border: 1px solid #b7791f; color: #e8c07d;
   border-radius: 10px; padding: 10px 14px; font-size: 13px; margin-bottom: 12px; }
 .sc-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }

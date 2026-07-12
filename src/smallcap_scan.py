@@ -62,18 +62,26 @@ def scan_and_open(db: Database, fh: Optional[FinnhubClient] = None,
     wall enforced inside submit_bracket_order). auto_place OFF -> sim only."""
     rows = db.get_smallcap_universe()
 
+    # GATE 2: measure per-family data coverage, then DISABLE any lane whose
+    # thesis-core family is degraded (e.g. insider at 0% -> turnaround +
+    # hidden_value off). A disabled lane never fires, so it can never mislabel a
+    # setup into the track record. lane_status is cached for the page.
+    coverage = L.family_coverage(rows)
+    disabled_status = L.lane_disable_status(coverage)
+    disabled = frozenset(disabled_status)
+
     # sector is now a SCORED FAMILY (A4), not a post-hoc bonus. Pass 1 gets
     # provisional triggers to feed sector heat; pass 2 re-scores with sector_early
     # folded into the composite (it can legitimately push a borderline name over).
     prov: list[dict[str, Any]] = []
     for row in rows:
-        prov.extend(L.evaluate_all(row))
+        prov.extend(L.evaluate_all(row, disabled=disabled))
     heat = sec.compute_sector_heat(db, prov)
 
     triggers: list[dict[str, Any]] = []
     for row in rows:
         se = sec.is_sector_early(heat, row.get("sector_name"))
-        for t in L.evaluate_all(row, sector_early=se):
+        for t in L.evaluate_all(row, sector_early=se, disabled=disabled):
             t["_signals"] = row.get("signals")   # for the opener's level math
             triggers.append(t)
 
@@ -105,10 +113,15 @@ def scan_and_open(db: Database, fh: Optional[FinnhubClient] = None,
         algo = order_executor.execute_candidates(db, alpaca, risk_mgr, config, cands)
 
     clean = [{k: v for k, v in t.items() if k != "_signals"} for t in triggers]
+    # lane_status: every lane's enabled/disabled state + the reason, so each tab
+    # can say plainly why it's empty (GATE 2). Chart lanes are always enabled.
+    lane_status = {lane: (disabled_status[lane] if lane in disabled_status
+                          else {"disabled": False}) for lane in L.LANES}
     db.cache_put(TRIGGERS_KEY, {"as_of": datetime.now(timezone.utc).isoformat(),
-                                "triggers": clean, "sector_heat": heat})
+                                "triggers": clean, "sector_heat": heat,
+                                "lane_status": lane_status, "family_coverage": coverage})
     summary = {"universe": len(rows), "triggers": len(triggers), "opened": opened,
-               "sectors": len(heat)}
+               "sectors": len(heat), "disabled_lanes": sorted(disabled)}
     if algo is not None:
         summary["algo_placed"] = algo.get("placed", 0)
         summary["algo_refused"] = algo.get("refused", 0)

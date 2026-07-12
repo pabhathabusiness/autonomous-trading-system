@@ -207,6 +207,45 @@ CREATE TABLE IF NOT EXISTS mtf_conflicts (
     label TEXT,
     note TEXT
 );
+
+-- Addendum 2 (quarantined small-cap lane). Daily-refreshed screen snapshot.
+-- Finnhub-sourced fields (float_shares, so_proxy, dilution_risk, upside_to_target_pct,
+-- has_options/options_liquid/has_leaps) stay NULL until FINNHUB_KEY is set + verified;
+-- OHLC-derived fields populate from yfinance now.
+CREATE TABLE IF NOT EXISTS smallcap_universe (
+    symbol TEXT PRIMARY KEY,
+    updated_at TEXT,
+    price REAL,
+    exchange TEXT,
+    sector_name TEXT,
+    float_shares REAL,          -- millions
+    so_proxy INTEGER,           -- 1 = shares-outstanding proxy, not true float
+    float_tier TEXT,            -- runner | low | standard
+    avg_dollar_vol_20d REAL,
+    rel_vol REAL,               -- v1 daily
+    bb_percentile REAL,
+    daily_compression INTEGER,
+    compression_extreme INTEGER,
+    squeeze_days INTEGER,
+    up_wow INTEGER,
+    consecutive_up_weeks INTEGER,
+    dilution_risk INTEGER,
+    upside_to_target_pct REAL,
+    has_options INTEGER,
+    options_liquid INTEGER,
+    has_leaps INTEGER,
+    signals_json TEXT
+);
+
+-- Auditable hard-exclusion list. Names exit only by aging out of the criteria.
+CREATE TABLE IF NOT EXISTS smallcap_deathwatch (
+    symbol TEXT PRIMARY KEY,
+    reason TEXT NOT NULL,       -- reverse_split_18mo | serial_reverse_split | going_concern
+                               -- | share_dilution_100pct | sub_dollar_20d | permanent
+    detail TEXT,
+    added_at TEXT NOT NULL,
+    last_checked TEXT
+);
 """
 
 
@@ -290,6 +329,8 @@ class Database:
                 # --- Lane 4: regime + MTF context at open ---
                 ("market_regime", "TEXT"),
                 ("mtf_alignment", "TEXT"),
+                # --- Addendum 2: quarantined small-cap lane tag ---
+                ("lane", "TEXT"),   # runner | bounce | value | hailmary (book='smallcap' rows)
             ],
         }
         for table, cols in migrations.items():
@@ -636,7 +677,7 @@ class Database:
                    p.reasoning     AS proposal_reasoning
             FROM paper_trades pt
             LEFT JOIN proposals p ON pt.proposal_id = p.id
-            WHERE (pt.book = 'algo' OR pt.book IS NULL)
+            WHERE (pt.book IS NULL OR pt.book != 'smallcap')
         """
         params: list[Any] = []
         if status:

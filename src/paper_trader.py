@@ -93,7 +93,7 @@ def _max_hold_days(timeframe: str) -> int:
 
 
 def open_from_proposal(db: Database, proposal: dict, proposal_id: int, *,
-                       book: str = "algo", source: str = "algo",
+                       book: str = "swing", source: str = "algo",
                        analysis: dict | None = None, config: dict | None = None) -> None:
     """Open a simulated trade mirroring a proposal (idempotent per proposal).
 

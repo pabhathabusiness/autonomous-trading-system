@@ -325,7 +325,10 @@ def enrich_symbol(db: Database, fh: FinnhubClient, symbol: str,
         "fundamentals": value_fundamentals(metric, so_m),
         "catalyst": catalyst,
         "catalyst_class": {"weight": news_class["weight"], "type": news_class["type"]},
-        "news_available": news_class.get("count_window", 0) > 0,   # BUG-5: no news != zero signal
+        # available = the feed was SEARCHED (even if empty). A searched-but-empty feed
+        # is available-and-zero (a drag in the denominator), NOT "no data". Only a
+        # failed/disabled fetch (news is None) is truly unavailable. (floodgate fix)
+        "news_available": news is not None,
         "going_concern": news_class["going_concern"],
         "insider": insider,
         "fundamental_trends": {"revenue_trend": edges.revenue_trend(series)},

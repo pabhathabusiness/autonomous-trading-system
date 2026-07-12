@@ -55,7 +55,15 @@ def scan_and_open(db: Database, fh: Optional[FinnhubClient] = None,
 
     opened = 0
     if open_trades:
-        for t in sorted(triggers, key=lambda x: x["score"], reverse=True):
+        # One position per symbol: a name can legitimately qualify for several lanes,
+        # but the OPENER takes only its single best-composite lane (else one name
+        # could open six correlated positions). The page cache below keeps them all.
+        best_per_sym: dict[str, dict[str, Any]] = {}
+        for t in triggers:
+            s = t["symbol"]
+            if s not in best_per_sym or t["score"] > best_per_sym[s]["score"]:
+                best_per_sym[s] = t
+        for t in sorted(best_per_sym.values(), key=lambda x: x["score"], reverse=True):
             if smallcap_trader.open_smallcap_trigger(db, t, config):
                 opened += 1
 

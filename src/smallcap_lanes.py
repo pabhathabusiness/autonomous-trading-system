@@ -38,6 +38,18 @@ COMPOSITE_THRESHOLD = 6.5    # provisional (weekday re-validation owed)
 MIN_FAMILIES = 3
 FAMILY_FIRE = 0.5
 
+# FLOODGATE GUARD (adversarial-review finding). BUG-5's available-only denominator
+# re-normalizes onto whatever families have data. For chart-driven lanes that just
+# un-empties the page (multiplier ~1.0). But for the fundamental-thesis lanes it
+# lets the denominator COLLAPSE onto OHLC families when the thesis families are
+# absent (the normal small-cap case) -> a 2x lift that fires the lane on pure chart
+# data with zero evidence for the thesis. Two guards close it:
+#   (1) MIN_COVERAGE: a lane may not judge itself when > half its edge WEIGHT is
+#       absent -- the surviving families can't carry the thesis.
+#   (2) require_available (per lane, below): a fundamental-thesis lane must have its
+#       core family's DATA present to fire at all.
+MIN_COVERAGE = 0.55
+
 # migration map old lane value -> new (used by the DB migration + readers)
 LANE_REMAP = {"bounce": "reversal", "coiled": "compression", "value": "hidden_value"}
 LANE_DELETED = {"runner", "hailmary", "special"}   # -> legacy_<old>
@@ -55,8 +67,8 @@ _LANE_META = {
     "breakout":          {"float_ceiling": 500, "price_tiers": ("special", "low", "sub2"), "bands": ("short", "medium"),    "hard": (), "gate": "breakout"},
     "compression":       {"float_ceiling": 300, "price_tiers": ("special", "low", "sub2"), "bands": ("short", "medium"),    "hard": (), "gate": None},
     "emerging_strength": {"float_ceiling": 500, "price_tiers": ("special", "low", "sub2"), "bands": ("medium", "position"), "hard": (), "gate": None},
-    "hidden_value":      {"float_ceiling": 500, "price_tiers": ("special", "low"),         "bands": ("medium", "position"), "hard": (), "gate": None},
-    "turnaround":        {"float_ceiling": 500, "price_tiers": ("special", "low"),         "bands": ("position", "medium"), "hard": (), "gate": None},
+    "hidden_value":      {"float_ceiling": 500, "price_tiers": ("special", "low"),         "bands": ("medium", "position"), "hard": (), "gate": None, "require_available": ("fundamental",)},
+    "turnaround":        {"float_ceiling": 500, "price_tiers": ("special", "low"),         "bands": ("position", "medium"), "hard": (), "gate": None, "require_available": ("fundamental",)},
 }
 _BANDS = {  # band -> (rr_floor, time_stop_days, atr_stop_mult, atr_target_mult)
     "overnight": (1.8, 2, 0.6, 1.5), "short": (2.0, 5, 1.0, 2.0),
@@ -293,15 +305,27 @@ def eval_lane(lane: str, row: dict[str, Any], scores: dict[str, float],
         if res is None:
             return None
         gate_tags = res
+    # FLOODGATE GUARD (2): a fundamental-thesis lane must have its core family's DATA
+    # present -- otherwise the composite is a chart score wearing a value/inflection label.
+    for req in _LANE_META[lane].get("require_available", ()):
+        if not avail.get(req):
+            return None
     w = _WEIGHTS[lane]
     # BUG-5: normalize over AVAILABLE families only
     num = sum(w[f] * scores[f] for f in EDGE_FAMILIES if avail[f] and w[f] > 0)
     den = sum(w[f] for f in EDGE_FAMILIES if avail[f] and w[f] > 0)
-    if den <= 0:
+    den_all = sum(w[f] for f in EDGE_FAMILIES if w[f] > 0)
+    if den <= 0 or den_all <= 0:
+        return None
+    # FLOODGATE GUARD (1): can't judge the thesis when > half its edge weight is absent
+    if den / den_all < MIN_COVERAGE:
         return None
     composite = round(_clamp(10.0 * num / den + pen_pts, 0.0, 10.0), 2)
     fired = [f for f in EDGE_FAMILIES if avail[f] and scores[f] >= FAMILY_FIRE and w[f] > 0]
-    if composite < COMPOSITE_THRESHOLD or len(fired) < MIN_FAMILIES:
+    # sector is a system panel, not a name-specific signal -> it doesn't count toward
+    # the "3 independent families" that establish a real setup on THIS name.
+    fired_ns = [f for f in fired if f != "sector"]
+    if composite < COMPOSITE_THRESHOLD or len(fired_ns) < MIN_FAMILIES:
         return None
     band = _pick_band(lane, dt)
     rr, tstop, _, _ = _BANDS[band]
@@ -359,9 +383,12 @@ def best_composite(row: dict[str, Any], *, sector_early: bool = False) -> dict[s
     for lane in LANES:
         if not _eligible(lane, row):
             continue
+        if any(not avail.get(req) for req in _LANE_META[lane].get("require_available", ())):
+            continue
         w = _WEIGHTS[lane]
         den = sum(w[f] for f in EDGE_FAMILIES if avail[f] and w[f] > 0)
-        if den <= 0:
+        den_all = sum(w[f] for f in EDGE_FAMILIES if w[f] > 0)
+        if den <= 0 or den_all <= 0 or den / den_all < MIN_COVERAGE:
             continue
         comp = round(_clamp(10.0 * sum(w[f] * scores[f] for f in EDGE_FAMILIES if avail[f] and w[f] > 0) / den + pen_pts, 0, 10), 2)
         fired = [f for f in EDGE_FAMILIES if avail[f] and scores[f] >= FAMILY_FIRE and w[f] > 0]

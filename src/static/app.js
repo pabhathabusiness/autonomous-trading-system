@@ -1179,6 +1179,178 @@ function openTrade(id) {
   showSheet();
 }
 
+// ============================ SMALL CAPS (Addendum 2) ============================
+const scEsc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g,
+  c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+let scLane = "runner";
+let scCache = { triggers: [], sector_heat: {} };
+const SC_LANE_LABEL = { runner: "Runners", bounce: "Demand Bounce", value: "Quality Value", hailmary: "Hail Mary" };
+
+async function loadSmallcaps() {
+  try {
+    const [tr, uni, dw] = await Promise.all([
+      fetchJSON("/api/smallcap/triggers"),
+      fetchJSON("/api/smallcap/universe").catch(() => ({ coiled: [] })),
+      fetchJSON("/api/smallcap/deathwatch").catch(() => ({ deathwatch: [] })),
+    ]);
+    scCache = tr;
+    renderScStatus(tr);
+    renderScSectorHeat(tr.sector_heat || {});
+    renderScCoiled(uni.coiled || []);
+    renderScDeathwatch(dw.deathwatch || []);
+    if (scLane === "record") loadScRecord(); else renderScCards();
+  } catch (e) {
+    $("sc-cards").innerHTML = `<p class="muted">${scEsc(e.message)}</p>`;
+  }
+}
+
+function renderScStatus(d) {
+  const on = d.enabled, fh = d.finnhub_enabled;
+  const bits = [
+    `<b>${d.universe_count ?? 0}</b> in universe`,
+    `<b>${(d.triggers || []).length}</b> triggers`,
+    `<b>${d.deathwatch_count ?? 0}</b> excluded`,
+    on ? `<span class="sc-on">● engine on</span>` : `<span class="sc-off">○ engine off</span>`,
+    fh ? "" : `<span class="sc-off">Finnhub off</span>`,
+  ].filter(Boolean);
+  $("sc-status").innerHTML = bits.join(" · ");
+}
+
+function scSetLane(lane) {
+  scLane = lane;
+  document.querySelectorAll(".sc-tab").forEach(t => t.classList.toggle("active", t.dataset.lane === lane));
+  const rec = lane === "record";
+  $("sc-record").style.display = rec ? "" : "none";
+  $("sc-cards").style.display = rec ? "none" : "";
+  $("sc-side-blocks").style.display = rec ? "none" : "";
+  $("sc-hm-note").style.display = lane === "hailmary" ? "" : "none";
+  if (rec) loadScRecord(); else renderScCards();
+}
+
+function renderScCards() {
+  const wrap = $("sc-cards");
+  const all = scCache.triggers || [];
+  const rows = scLane === "all" ? all : all.filter(t => t.lane === scLane);
+  rows.sort((a, b) => (b.score || 0) - (a.score || 0));
+  if (!rows.length) {
+    wrap.innerHTML = `<p class="muted">No ${SC_LANE_LABEL[scLane] || ""} triggers right now. ` +
+      `The screen runs on cadence; a quiet tape means no qualifying setups (that's correct, not a bug).</p>`;
+    return;
+  }
+  wrap.innerHTML = rows.map(scCard).join("");
+}
+
+function scChip(c) {
+  const cls = { "COILED": "chip-coiled", "DILUTION": "chip-dilution", "LOW FLOAT": "chip-lowfloat",
+    "SECTOR EARLY": "chip-early" }[c] || "chip-plain";
+  return `<span class="sc-chip ${cls}">${scEsc(c)}</span>`;
+}
+
+function scCard(t) {
+  const tierCls = { runner: "tier-runner", low: "tier-low", standard: "tier-standard" }[t.float_tier] || "";
+  const cat = t.catalyst;
+  const catHtml = cat ? `<div class="sc-cat"><span class="sc-cat-dot">◆</span>${scEsc(cat.headline || "")}
+      <span class="sc-cat-src">${scEsc(cat.source || "")} · ${num(cat.age_h, 0)}h ago</span></div>` : "";
+  const ds = (t.demand_signals || []).map(s => `<span class="sc-ds">${scEsc(s)}</span>`).join("");
+  const chips = (t.chips || []).map(scChip).join("");
+  const reasons = (t.reasons || []).map(r => scEsc(r)).join(" · ");
+  const laneCls = t.lane === "hailmary" ? "sc-card-hm" : "";
+  return `<div class="sc-card ${laneCls}">
+    <div class="sc-card-top">
+      <div class="sc-sym">${scEsc(t.symbol)}<span class="sc-lane-tag">${SC_LANE_LABEL[t.lane] || t.lane}</span></div>
+      <div class="sc-score" title="lane score">${num(t.score, 0)}</div>
+    </div>
+    <div class="sc-card-row">
+      <span class="sc-px">${price(t.price)}</span>
+      <span class="sc-tier ${tierCls}">${t.float_tier || "?"} · ${num(t.float_shares, 0)}M float${t.so_proxy ? " (SO-proxy)" : ""}</span>
+      <span class="sc-relvol">${num(t.rel_vol, 1)}× rvol</span>
+    </div>
+    <div class="sc-chips">${chips}${ds}</div>
+    ${catHtml}
+    <div class="sc-reasons">${reasons}</div>
+  </div>`;
+}
+
+function renderScSectorHeat(heat) {
+  const el = $("sc-sectorheat");
+  const rows = Object.values(heat || {}).sort((a, b) => (b.heat_score || 0) - (a.heat_score || 0));
+  if (!rows.length) { el.innerHTML = `<span class="muted">no bias panel yet</span>`; return; }
+  el.innerHTML = rows.map(s => `<div class="sc-heat-row ${s.sector_early ? "sc-early" : ""}">
+      <span class="sc-heat-name">${s.sector_early ? "🔥 " : ""}${scEsc(s.spdr)}</span>
+      <span class="sc-heat-bias bias-${s.bias}">${s.bias || "—"}</span>
+      <span class="sc-heat-n">${s.trigger_count || 0} trig</span>
+      <span class="sc-heat-score">${num(s.heat_score, 2)}</span>
+    </div>`).join("");
+}
+
+function renderScCoiled(coiled) {
+  const el = $("sc-coiled");
+  if (!coiled.length) { el.innerHTML = `<span class="muted">none coiled</span>`; return; }
+  el.innerHTML = coiled.sort((a, b) => (b.squeeze_days || 0) - (a.squeeze_days || 0)).map(c =>
+    `<div class="sc-coil-row"><b>${scEsc(c.symbol)}</b> ${price(c.price)}
+      <span class="muted">${c.squeeze_days || 0}d coil · bb ${num(c.bb_percentile, 0)}%ile</span></div>`).join("");
+}
+
+function renderScDeathwatch(list) {
+  $("sc-dw-count").textContent = list.length;
+  $("sc-deathwatch").innerHTML = list.length ? list.map(d =>
+    `<div class="sc-dw-row"><b>${scEsc(d.symbol)}</b> <span class="sc-dw-reason">${scEsc(d.reason)}</span>
+      <span class="muted">${scEsc(d.detail || "")}</span></div>`).join("")
+    : `<p class="muted">none excluded</p>`;
+}
+
+const SC_LANES_ORDER = ["runner", "bounce", "value", "hailmary", "aggregate_ex_hailmary"];
+async function loadScRecord() {
+  const el = $("sc-record");
+  el.innerHTML = "Loading…";
+  try {
+    const d = await fetchJSON("/api/smallcap/record");
+    const L = d.lanes || {}, G = d.graduation || {};
+    const rowFor = (k) => {
+      const s = L[k]; if (!s) return "";
+      const label = k === "aggregate_ex_hailmary" ? "AGG (ex-HM)" : (SC_LANE_LABEL[k] || k);
+      const exp = s.expectancy_r == null ? "-" : signed(s.expectancy_r, 2) + "R";
+      return `<tr class="${k === "aggregate_ex_hailmary" ? "sc-rec-agg" : ""}">
+        <td>${label}</td><td>${s.n_closed}</td><td>${s.n_open}</td>
+        <td>${s.win_rate == null ? "-" : (s.win_rate * 100).toFixed(0) + "%"}</td>
+        <td class="${(s.expectancy_r || 0) >= 0 ? "pos" : "neg"}">${exp}</td>
+        <td>${s.avg_hold_days == null ? "-" : s.avg_hold_days + "d"}</td>
+        <td class="pos">${s.best_r == null ? "-" : "+" + s.best_r + "R"}</td>
+        <td class="neg">${s.worst_r == null ? "-" : s.worst_r + "R"}</td>
+        <td>${s.max_dd_r}R</td>
+        <td class="sc-grad">${scEsc(G[k] || "")}</td></tr>`;
+    };
+    const tbl = `<div class="block-head"><h3>Which lane is actually mine?</h3>
+      <span class="sub">the whole point — per-lane, never blended (HM excluded from AGG)</span></div>
+      <table class="sc-rec-table"><thead><tr>
+        <th>Lane</th><th>closed</th><th>open</th><th>win</th><th>exp</th><th>hold</th>
+        <th>best</th><th>worst</th><th>maxDD</th><th>graduation</th></tr></thead>
+      <tbody>${SC_LANES_ORDER.map(rowFor).join("")}</tbody></table>`;
+    const trades = (d.trades || []).slice(0, 60).map(t => `<tr>
+        <td>${scEsc(t.symbol)}</td><td>${SC_LANE_LABEL[t.lane] || t.lane}</td>
+        <td>${price(t.entry_price)}</td><td>${price(t.stop_loss)}</td><td>${price(t.target_price)}</td>
+        <td class="${t.status === "closed" ? (t.outcome === "win" ? "pos" : "neg") : "muted"}">${t.status === "closed" ? t.outcome : "open"}</td>
+        <td class="${(t.r_multiple || 0) >= 0 ? "pos" : "neg"}">${t.r_multiple == null ? "-" : signed(t.r_multiple, 2) + "R"}</td>
+        <td>${num(t.lane_score, 0)}</td></tr>`).join("");
+    el.innerHTML = tbl + `<div class="block-head" style="margin-top:18px"><h3>Trades (${d.count})</h3>
+      <span class="sub">book='smallcap' · paper-only</span></div>
+      <table class="sc-rec-table"><thead><tr><th>Sym</th><th>Lane</th><th>entry</th><th>stop</th><th>target</th>
+        <th>status</th><th>R</th><th>score</th></tr></thead><tbody>${trades || ""}</tbody></table>`;
+  } catch (e) {
+    el.innerHTML = `<p class="muted">${scEsc(e.message)}</p>`;
+  }
+}
+
+function initSmallcaps() {
+  document.querySelectorAll(".sc-tab").forEach(tab =>
+    tab.addEventListener("click", () => scSetLane(tab.dataset.lane)));
+  // deep-link: /smallcaps and /smallcaps/record
+  if (location.pathname.startsWith("/smallcaps")) {
+    switchView("smallcaps");
+    if (location.pathname.indexOf("/record") >= 0) scSetLane("record");
+  }
+}
+
 // ---- view switching ----
 function currentView() {
   const el = document.querySelector(".navtab.active");
@@ -1189,6 +1361,7 @@ function switchView(v) {
   document.querySelectorAll(".view").forEach(s => s.classList.toggle("active", s.id === "view-" + v));
   if (v === "dashboard") { loadMarketOverview(); loadMarketBias(); loadBiasStrip(); loadSectorBoard(); loadAlgo(); }
   else if (v === "track") { loadAlgo(); }
+  else if (v === "smallcaps") { loadSmallcaps(); }
   else if (v === "sectors") { loadSectors(); }
   else if (v === "more") { loadAll(); }
 }
@@ -1215,6 +1388,7 @@ loadSectorBoard();
 loadAlgo();
 loadEngineStatus();
 loadAll();
+initSmallcaps();
 
 // Live refresh, no page reload: the active live view every ~6s, engine status
 // every 15s, the detailed panels every 30s.
@@ -1222,6 +1396,7 @@ setInterval(() => {
   const v = currentView();
   if (v === "dashboard") { loadBiasStrip(); loadSectorBoard(); loadAlgo(); }
   else if (v === "track") { loadAlgo(); }
+  else if (v === "smallcaps" && scLane !== "record") { loadSmallcaps(); }
 }, 6000);
 setInterval(loadEngineStatus, 15000);
 setInterval(() => { if (currentView() === "dashboard") { loadMarketOverview(); loadMarketBias(); } }, 60000);

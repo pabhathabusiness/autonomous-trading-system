@@ -12,6 +12,7 @@
     <nav class="navtabs">
       <button class="navtab active" data-view="dashboard">Dashboard</button>
       <button class="navtab" data-view="track">Track Record</button>
+      <button class="navtab" data-view="smallcaps">Small Caps</button>
       <button class="navtab" data-view="sectors">Sectors</button>
       <button class="navtab" data-view="more">More</button>
     </nav>
@@ -64,6 +65,46 @@
         <span class="sub" id="track-summary">autofills after each execution · paper (pulls Alpaca marks once auto-execute is on)</span></div>
       <div id="track-cards" class="scorecards"></div>
       <div id="track-body">Loading…</div>
+    </section>
+  </main>
+
+  <!-- ===================== SMALL CAPS (Addendum 2) ===================== -->
+  <main id="view-smallcaps" class="view">
+    <section class="block">
+      <div class="block-head">
+        <h2>Small Caps <span class="sc-quar" title="Fully separate from your main book — paper-only, never real, never Alpaca">quarantined · paper-only</span></h2>
+        <span class="sub" id="sc-status">Loading…</span>
+      </div>
+      <div class="sc-subtabs">
+        <button class="sc-tab active" data-lane="runner">Runners <span class="sc-hint">&lt;20M float</span></button>
+        <button class="sc-tab" data-lane="bounce">Demand Bounce</button>
+        <button class="sc-tab" data-lane="value">Quality Value</button>
+        <button class="sc-tab sc-tab-hm" data-lane="hailmary">Hail Mary</button>
+        <button class="sc-tab" data-lane="all">All</button>
+        <button class="sc-tab" data-lane="record">📊 Lane Record</button>
+      </div>
+      <div id="sc-hm-note" class="sc-hm-note" style="display:none">
+        ⚠ Hail Mary is a hypothesis lab — explicitly speculative, fixed size, max 2 open, <b>permanently paper</b>. Never blended into the aggregate.
+      </div>
+      <div id="sc-cards" class="sc-cards">Loading…</div>
+      <div id="sc-record" class="sc-record" style="display:none"></div>
+    </section>
+
+    <section class="block" id="sc-side-blocks">
+      <div class="sc-side">
+        <div class="sc-side-col">
+          <div class="block-head"><h3>🌀 Coiled Watchlist</h3><span class="sub">compression extreme — not yet expanded</span></div>
+          <div id="sc-coiled" class="sc-coiled">—</div>
+        </div>
+        <div class="sc-side-col">
+          <div class="block-head"><h3>🔥 Sector Heat</h3><span class="sub">cheap names moving before mid-caps confirm</span></div>
+          <div id="sc-sectorheat" class="sc-sectorheat">—</div>
+        </div>
+      </div>
+      <details class="sc-deathwatch">
+        <summary>Excluded — deathwatch (<span id="sc-dw-count">0</span>) <span class="sub">reverse-split / sub-$1 / dilution — auditable, aged-out only</span></summary>
+        <div id="sc-deathwatch"></div>
+      </details>
     </section>
   </main>
 

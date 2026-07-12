@@ -31,6 +31,7 @@ from src import live as live_module
 from src import market_overview as market_overview_module
 from src import mtf_bias
 from src import news_refresher
+from src import smallcap_scan
 from src.finnhub_client import FinnhubClient
 from src import paper_trader
 from src.scheduler import AutonomousScheduler
@@ -870,6 +871,127 @@ def get_algo_log(status: Optional[str] = None,
     legacy = sum(1 for t in trades if t["legacy"])
     return {"count": len(trades), "graded": graded, "ungraded": ungraded,
             "legacy": legacy, "trades": trades}
+
+
+# ------------------------------------------------------- Addendum 2: Small Caps
+def _r_multiple(t: dict[str, Any]) -> Optional[float]:
+    """R on a closed trade: the stored r_multiple (computed at close), else derive
+    from return_pct / risk%."""
+    if t.get("r_multiple") is not None:
+        return t["r_multiple"]
+    entry, stop, ret = t.get("entry_price"), t.get("stop_loss"), t.get("return_pct")
+    if entry and stop and ret is not None and entry != stop:
+        risk_pct = abs(entry - stop) / entry * 100
+        return round(ret / risk_pct, 2) if risk_pct else None
+    return None
+
+
+def _hold_days(t: dict[str, Any]) -> Optional[float]:
+    try:
+        e = datetime.fromisoformat(t["entry_date"])
+        x = datetime.fromisoformat(t["exit_date"])
+        return round((x - e).total_seconds() / 86400, 1)
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
+def _smallcap_lane_stats(trades: list[dict[str, Any]]) -> dict[str, Any]:
+    """Per-lane record: n, win rate, expectancy (R), avg hold, best/worst R, plus
+    a max-drawdown-in-R and the graduation verdict. Aggregate EXCLUDES hailmary."""
+    from collections import defaultdict
+    by_lane: dict[str, list] = defaultdict(list)
+    for t in trades:
+        by_lane[t.get("lane") or "?"].append(t)
+
+    def stats_for(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        closed = [t for t in rows if t.get("status") == "closed"]
+        rs = [r for r in (_r_multiple(t) for t in closed) if r is not None]
+        wins = sum(1 for t in closed if t.get("outcome") == "win")
+        holds = [h for h in (_hold_days(t) for t in closed) if h is not None]
+        # max drawdown in R over the closed sequence (entry-date order)
+        cum = peak = dd = 0.0
+        for r in rs:
+            cum += r
+            peak = max(peak, cum)
+            dd = min(dd, cum - peak)
+        exp = round(sum(rs) / len(rs), 3) if rs else None
+        return {"n_open": len(rows) - len(closed), "n_closed": len(closed),
+                "win_rate": round(wins / len(closed), 3) if closed else None,
+                "expectancy_r": exp, "avg_hold_days": round(sum(holds) / len(holds), 1) if holds else None,
+                "best_r": max(rs) if rs else None, "worst_r": min(rs) if rs else None,
+                "max_dd_r": round(dd, 2), "sum_r": round(sum(rs), 2) if rs else 0.0}
+
+    lanes = {lane: stats_for(rows) for lane, rows in by_lane.items()}
+    agg_rows = [t for t in trades if (t.get("lane") or "") != "hailmary"]
+    lanes["aggregate_ex_hailmary"] = stats_for(agg_rows)
+
+    def graduation(lane: str, s: dict[str, Any]) -> str:
+        if lane == "hailmary":
+            return "Permanently paper (hypothesis lab)."
+        if (s["n_closed"] >= 30 and (s["expectancy_r"] or -9) > 0.15 and s["max_dd_r"] > -10):
+            return "LIVE-ELIGIBLE (n>=30, expectancy>+0.15R, maxDD<10R)."
+        return f"Paper only ({s['n_closed']}/30 closed; needs +0.15R exp, <10R DD)."
+    grads = {lane: graduation(lane, s) for lane, s in lanes.items() if lane != "aggregate_ex_hailmary"}
+    return {"lanes": lanes, "graduation": grads}
+
+
+@app.get("/api/smallcap/triggers")
+def smallcap_triggers() -> dict[str, Any]:
+    """Latest cached lane triggers + sector-heat map (the scheduler/scan refreshes
+    it). universe_count + deathwatch_count for the header."""
+    payload = smallcap_scan.latest_triggers(DB)
+    return {**payload, "finnhub_enabled": FINNHUB.enabled,
+            "enabled": SCHEDULER.smallcap_enabled,
+            "universe_count": len(DB.get_smallcap_universe()),
+            "deathwatch_count": len(DB.get_smallcap_deathwatch())}
+
+
+@app.get("/api/smallcap/universe")
+def smallcap_universe(tier: Optional[str] = None) -> dict[str, Any]:
+    rows = DB.get_smallcap_universe(tier=tier)
+    coiled = [r for r in rows if r.get("compression_extreme")]
+    return {"count": len(rows), "universe": rows, "coiled": coiled}
+
+
+@app.get("/api/smallcap/deathwatch")
+def smallcap_deathwatch() -> dict[str, Any]:
+    rows = DB.get_smallcap_deathwatch()
+    return {"count": len(rows), "deathwatch": rows}
+
+
+@app.get("/api/smallcap/record")
+def smallcap_record(lane: Optional[str] = None, status: Optional[str] = None) -> dict[str, Any]:
+    trades = DB.get_smallcap_trades(status=status, lane=lane)
+    for t in trades:
+        t["r_multiple"] = _r_multiple(t)
+    stats = _smallcap_lane_stats(DB.get_smallcap_trades())   # stats over the FULL book
+    return {"count": len(trades), "trades": trades, **stats}
+
+
+@app.post("/api/smallcap/scan")
+def smallcap_scan_now() -> dict[str, Any]:
+    """Manual fast lane scan over the CURRENT universe (opens paper triggers).
+    Does not rebuild the universe -- use /refresh for that."""
+    return smallcap_scan.scan_and_open(DB, FINNHUB, CONFIG, open_trades=True)
+
+
+@app.post("/api/smallcap/refresh")
+def smallcap_refresh_now(max_enrich: Optional[int] = None) -> dict[str, Any]:
+    """Kick a universe rebuild in a background thread (the full screen is slow).
+    Returns immediately; poll /api/smallcap/triggers for universe_count."""
+    if not FINNHUB.enabled:
+        return {"started": False, "reason": "finnhub_disabled"}
+    import threading
+    threading.Thread(target=lambda: smallcap_scan.refresh_universe(DB, FINNHUB, max_enrich=max_enrich),
+                     name="sc-universe-manual", daemon=True).start()
+    return {"started": True, "note": "universe rebuild running in background"}
+
+
+@app.get("/smallcaps")
+@app.get("/smallcaps/record")
+def smallcaps_page() -> FileResponse:
+    """Serve the SPA shell for the small-cap deep links (client routes by path)."""
+    return FileResponse(str(STATIC_DIR / "index.html"))
 
 
 if STATIC_DIR.exists():

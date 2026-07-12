@@ -131,9 +131,15 @@ def build_panel() -> dict[str, Any]:
         price = float(closes.iloc[-1])
         e20 = indicators.ema(closes, 20)
         bb = indicators.bollinger_bands(closes)
+        b = tf_bias(w)
+        # bias as of ~2 weeks ago -> "recently_bull" flags a fresh flip (Addendum 2
+        # sector_early: the early window before a sector's move is obvious)
+        prev_b = tf_bias(w.iloc[:-2]) if len(w) > 27 else None
         rows[sym] = {
             "symbol": sym,
-            "bias": tf_bias(w),
+            "bias": b,
+            "bias_prev": prev_b,
+            "recently_bull": bool(b == "bullish" and prev_b != "bullish"),
             "rs_vs_spy": None if sym == "SPY" else _rs_vs_spy(closes, spy_closes),
             "dist_20w_pct": round((price - e20) / e20 * 100, 2) if e20 else None,
             "weekly_squeeze": bool(bb.get("squeeze")),

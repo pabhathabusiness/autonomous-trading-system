@@ -258,6 +258,10 @@ class Database:
                 ("exit_reason", "TEXT"),   # stop | target | timeout | unknown
                 ("mae_r", "REAL"),         # max adverse excursion, in R
                 ("mfe_r", "REAL"),         # max favorable excursion, in R
+                # --- Lane 2: retro track (legacy) + quadrants (all closed) ---
+                ("retro_grade", "TEXT"),   # A..F, shown as R-A..R-F (outline badge)
+                ("retro_score", "REAL"),   # 0-100 rubric score behind retro_grade
+                ("quadrant", "TEXT"),      # skill_win | lucky_win | good_loss | bad_loss
             ],
         }
         for table, cols in migrations.items():
@@ -503,6 +507,22 @@ class Database:
         query += " ORDER BY pt.entry_date DESC"
         with self._conn() as conn:
             return [dict(r) for r in conn.execute(query, params).fetchall()]
+
+    _ENRICHABLE = frozenset({"exit_reason", "mae_r", "mfe_r", "quadrant",
+                             "retro_grade", "retro_score"})
+
+    def enrich_paper_trade(self, trade_id: int, **fields: Any) -> None:
+        """Enrich-only writer for derived post-close fields: each column is set
+        ONLY if currently NULL (ground rule: never overwrite a populated field).
+        Column names are restricted to a fixed allowlist."""
+        with self._conn() as conn:
+            for col, val in fields.items():
+                if col not in self._ENRICHABLE:
+                    raise ValueError(f"enrich_paper_trade: column '{col}' not allowed")
+                conn.execute(
+                    f"UPDATE paper_trades SET {col} = ? WHERE id = ? AND {col} IS NULL",
+                    (val, trade_id),
+                )
 
     def close_paper_trade(self, trade_id: int, exit_price: float, return_pct: float,
                           outcome: str, status: str) -> None:

@@ -28,7 +28,7 @@ import threading
 import time
 from datetime import datetime, time as dt_time, timezone
 
-from src import paper_trader
+from src import paper_trader, post_close
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +148,9 @@ class AutonomousScheduler:
         with self._lock:
             live_closed = close_on_live_cross(self.db, self.alpaca)
             summary = paper_trader.resolve_open(self.db)
+            # derive exit_reason / MAE-MFE / quadrant for anything newly closed
+            # (enrich-only writes; the close functions themselves stay untouched)
+            self._safe(lambda: post_close.enrich_closed(self.db), "post-close-enrich")
         self.last_monitor_at = datetime.now(timezone.utc).isoformat()
         if live_closed or summary.get("wins") or summary.get("losses") or summary.get("expired"):
             logger.info("Monitor: live_closed=%s replay=%s", live_closed, summary)

@@ -307,6 +307,10 @@ tbody tr:hover { background: rgba(255,255,255,0.03); }
 .g-F { color: var(--muted); background: transparent; border: 1.5px solid var(--border); }
 .g-U { color: var(--yellow); background: rgba(241,196,15,0.12); border: 1px dashed rgba(241,196,15,0.4); font-size: 10px; }
 .g-L { color: var(--muted); background: rgba(255,255,255,0.04); border: 1px solid var(--border); }
+/* retro track: OUTLINED R-X badge, deliberately distinct from filled live grades */
+.g-R { color: #b9a8f5; background: transparent; border: 1.5px solid var(--grade); font-size: 12px; letter-spacing: -0.02em; }
+.grade.sm.g-R { font-size: 10px; }
+.trackbar { grid-column: 1 / -1; margin-bottom: 2px; }
 .chip-legacy { color: var(--muted); background: rgba(255,255,255,0.05); border: 1px dashed var(--border); }
 .chip-q { color: var(--muted); border: 1px solid var(--border); }
 

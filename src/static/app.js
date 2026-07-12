@@ -670,9 +670,19 @@ function setupChip(t) {
 }
 function gradeBadge(t, small) {
   const sm = small ? ' sm' : '';
-  if (t.legacy) return `<span class="grade${sm} g-L" title="legacy trade — pre-grading">L</span>`;
+  if (t.legacy) {
+    // retro track: outlined R-X badge (never blended with live filled badges)
+    if (t.retro_grade) return `<span class="grade${sm} g-R" title="retro-grade ${t.retro_grade} (${t.retro_score ?? ''}) — rubric-scored from recoverable inputs, not a live process grade">R-${t.retro_grade}</span>`;
+    return `<span class="grade${sm} g-L" title="legacy trade — pre-grading">L</span>`;
+  }
   return `<span class="grade${sm} ${gradeClass(t.process_grade)}" title="${t.process_grade || ''} — ${t.process_notes || ''}">${gradeText(t.process_grade)}</span>`;
 }
+
+// Stat-card grade track: live process grades only (default), retro, or combined.
+let gradeTrack = "live";
+function setGradeTrack(k) { gradeTrack = k; renderTrackRecord(lastAlgoData); }
+const effGrade = (t) => (!t.legacy && t.process_grade && t.process_grade !== "UNGRADED")
+  ? t.process_grade : (t.retro_grade || null);
 
 function ideaRow(t) {
   const live = liveIndex[t.symbol];
@@ -706,33 +716,53 @@ function renderTrackRecord(d) {
   const trades = d.trades || [];
   const sm = $("track-summary");
 
-  // Scorecards measure the FINISHED system only: legacy rows (opened before the
-  // grading path existed) are shown in the table but excluded from the stats.
-  const graded = trades.filter(t => !t.legacy);
-  const closed = graded.filter(t => t.status === 'closed');
+  // Scorecards measure the selected GRADE TRACK (spec 2.2: never blended by
+  // default): live = process-graded · retro = R-graded legacy · combined = both.
+  const pop = gradeTrack === 'live' ? trades.filter(t => !t.legacy)
+    : gradeTrack === 'retro' ? trades.filter(t => t.legacy)
+      : trades;
+  const closed = pop.filter(t => t.status === 'closed');
   const wins = closed.filter(t => t.outcome === 'win').length;
   const rVals = closed.map(t => t.r_multiple).filter(v => v != null);
   const avgR = rVals.length ? rVals.reduce((a, b) => a + b, 0) / rVals.length : null;
   const totalPnl = closed.reduce((a, t) => a + (t.pnl_usd || 0), 0);
   const winRate = closed.length ? 100 * wins / closed.length : null;
-  const dist = { A: 0, B: 0, C: 0, D: 0, F: 0, UG: 0 };
-  graded.forEach(t => { const g = t.process_grade === 'UNGRADED' ? 'UG' : t.process_grade; if (g in dist) dist[g]++; });
   const legacyN = d.legacy ?? trades.filter(t => t.legacy).length;
 
+  // grade distribution per track (retro = outlined R-pills, never mixed in)
+  let distHtml;
+  if (gradeTrack === 'retro') {
+    const dist = { A: 0, B: 0, C: 0, D: 0, F: 0 };
+    pop.forEach(t => { if (t.retro_grade in dist) dist[t.retro_grade]++; });
+    distHtml = ['A', 'B', 'C', 'D', 'F'].map(g => `<span class="gpill g-R">R-${g} ${dist[g]}</span>`).join("");
+  } else {
+    const dist = { A: 0, B: 0, C: 0, D: 0, F: 0, UG: 0 };
+    pop.forEach(t => {
+      const g = gradeTrack === 'combined'
+        ? (effGrade(t) || (t.process_grade === 'UNGRADED' ? 'UG' : null))
+        : (t.process_grade === 'UNGRADED' ? 'UG' : t.process_grade);
+      if (g in dist) dist[g]++;
+    });
+    distHtml = ['A', 'B', 'C', 'D', 'F', 'UG'].map(g => `<span class="gpill ${g === 'UG' ? 'g-U' : 'g-' + g}">${g} ${dist[g]}</span>`).join("");
+  }
+
+  const tbtn = (label, key) =>
+    `<button class="chip ${gradeTrack === key ? 'on' : ''}" onclick="setGradeTrack('${key}')">${label}</button>`;
   const cards = $("track-cards");
   if (cards) cards.innerHTML = `
-    <div class="scard"><div class="big">${graded.length}</div><div class="lbl">graded trades</div></div>
+    <div class="trackbar filterbar"><span class="muted" style="font-size:11px;align-self:center">Grade track:</span>
+      ${tbtn('Graded (live)', 'live')}${tbtn('Retro', 'retro')}${tbtn('Combined', 'combined')}</div>
+    <div class="scard"><div class="big">${pop.length}</div><div class="lbl">${gradeTrack === 'live' ? 'graded trades' : gradeTrack === 'retro' ? 'retro-graded (legacy)' : 'all trades'}</div></div>
     <div class="scard"><div class="big">${winRate != null ? num(winRate, 0) + '%' : '—'}</div><div class="lbl">win rate (${closed.length} closed)</div></div>
     <div class="scard"><div class="big ${(avgR ?? 0) >= 0 ? 'pos' : 'neg'}">${avgR != null ? signed(avgR, 2) + 'R' : '—'}</div><div class="lbl">avg R-multiple</div></div>
     <div class="scard"><div class="big ${totalPnl >= 0 ? 'pos' : 'neg'}">${money(totalPnl, 0)}</div><div class="lbl">realized P&L</div></div>
-    <div class="scard grades"><div class="gdist">
-      ${['A', 'B', 'C', 'D', 'F', 'UG'].map(g => `<span class="gpill ${g === 'UG' ? 'g-U' : 'g-' + g}">${g} ${dist[g]}</span>`).join("")}
-    </div><div class="lbl">process grades</div></div>`;
+    <div class="scard grades"><div class="gdist">${distHtml}</div>
+      <div class="lbl">${gradeTrack === 'retro' ? 'retro grades (rubric)' : 'process grades'}</div></div>`;
 
   const nOpen = trades.filter(t => t.status === 'open').length;
   const nClosed = trades.filter(t => t.status === 'closed').length;
-  if (sm) sm.textContent = `${graded.length} graded · ${d.ungraded} ungraded` +
-    (legacyN ? ` · ${legacyN} legacy (pre-grading, excluded from stats)` : '') + ' — autofills after each trade';
+  if (sm) sm.textContent = `${trades.filter(t => !t.legacy).length} graded · ${d.ungraded} ungraded` +
+    (legacyN ? ` · ${legacyN} retro-graded legacy (R-badges)` : '') + ' — autofills after each trade';
 
   // filter: all / open / closed
   const rows = trackFilter === 'all' ? trades : trades.filter(t => t.status === trackFilter);

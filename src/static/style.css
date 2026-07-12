@@ -463,6 +463,30 @@ table.track .feedback { max-width: 230px; font-size: 12px; }
 .cov-cell.cov-bad  { border-color: rgba(229,62,62,.6); background: rgba(229,62,62,.07); }
 .cov-bad .cov-pct { color: var(--red,#e53e3e); }
 .cov-rl { color: var(--amber,#d69e2e); }
+/* B3 risk-utilization panel (the auto_place readiness surface) */
+.sc-risk { margin: 10px 0; border: 1px solid var(--border); border-radius: 11px; padding: 12px 14px; }
+.rk-head { font-size: 13px; font-weight: 700; margin-bottom: 10px; display: flex; gap: 8px;
+  align-items: center; flex-wrap: wrap; }
+.rk-chip { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 7px;
+  border: 1px solid var(--border); color: var(--muted); }
+.rk-chip.rk-armed { color: #fff; background: var(--red,#e53e3e); border-color: var(--red,#e53e3e); }
+.rk-chip.rk-safe { color: var(--green,#38a169); border-color: rgba(56,161,105,.5); }
+.rk-chip.rk-halt { color: #fff; background: var(--red,#e53e3e); border-color: var(--red,#e53e3e); }
+.rk-chip.rk-ok { color: var(--green,#38a169); border-color: rgba(56,161,105,.5); }
+.rk-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px,1fr)); gap: 10px; margin-bottom: 10px; }
+.rk-stat { display: flex; flex-direction: column; gap: 1px; }
+.rk-stat .rk-k { font-size: 11px; color: var(--muted); }
+.rk-stat .rk-val { font-size: 15px; font-weight: 700; }
+.rk-bars { display: flex; flex-direction: column; gap: 6px; }
+.rb { display: grid; grid-template-columns: 92px 1fr 96px; align-items: center; gap: 10px; font-size: 12px; }
+.rb-l { color: var(--muted); text-transform: capitalize; }
+.rb-track { height: 8px; background: var(--border); border-radius: 5px; overflow: hidden; }
+.rb-fill { height: 100%; border-radius: 5px; }
+.rb-fill.rb-ok { background: var(--green,#38a169); }
+.rb-fill.rb-warn { background: var(--amber,#d69e2e); }
+.rb-fill.rb-bad { background: var(--red,#e53e3e); }
+.rb-v { text-align: right; font-variant-numeric: tabular-nums; }
+.rb-sectors { grid-column: 2 / 4; font-size: 12px; }
 .sc-hm-note { background: rgba(183,121,31,.12); border: 1px solid #b7791f; color: #e8c07d;
   border-radius: 10px; padding: 10px 14px; font-size: 13px; margin-bottom: 12px; }
 .sc-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }

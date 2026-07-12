@@ -1208,14 +1208,16 @@ const SC_THESIS = {
 
 async function loadSmallcaps() {
   try {
-    const [tr, uni, dw, cov] = await Promise.all([
+    const [tr, uni, dw, cov, risk] = await Promise.all([
       fetchJSON("/api/smallcap/triggers"),
       fetchJSON("/api/smallcap/universe").catch(() => ({ coiled: [] })),
       fetchJSON("/api/smallcap/deathwatch").catch(() => ({ deathwatch: [] })),
       fetchJSON("/api/smallcap/coverage").catch(() => null),
+      fetchJSON("/api/risk/status").catch(() => null),
     ]);
     scCache = tr;
     renderScStatus(tr);
+    renderScRisk(risk);
     renderScCoverage(cov);
     markScDisabledTabs();
     renderScSectorHeat(tr.sector_heat || {});
@@ -1273,6 +1275,43 @@ function renderScCards() {
     return;
   }
   wrap.innerHTML = rows.map(scCard).join("");
+}
+
+function renderScRisk(rs) {
+  const el = $("sc-risk");
+  if (!el) return;
+  if (!rs || !rs.risk_state) { el.innerHTML = ""; return; }
+  const st = rs.risk_state;
+  const fmt = (v) => (v == null ? "—" : Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 }));
+  const bar = (pct, cap, label) => {
+    const p = pct == null ? 0 : pct;
+    const ratio = cap ? Math.min(100, p / cap * 100) : 0;
+    const cls = cap && p >= cap ? "rb-bad" : (cap && p >= cap * 0.8 ? "rb-warn" : "rb-ok");
+    return `<div class="rb"><div class="rb-l">${label}</div>` +
+      `<div class="rb-track"><div class="rb-fill ${cls}" style="width:${ratio}%"></div></div>` +
+      `<div class="rb-v">${pct == null ? "—" : p + "%"}<span class="muted"> / ${cap}%</span></div></div>`;
+  };
+  const maxSector = rs.max_positions_per_sector || 3;
+  const sectorsOver = Object.entries(rs.sector_counts || {}).filter(([, n]) => n >= maxSector);
+  const laneBars = Object.entries(rs.lane_notional_pct || {})
+    .map(([lane, pct]) => bar(pct, rs.per_lane_cap_pct, "lane " + lane)).join("");
+  const chips = [
+    `<span class="rk-chip ${rs.auto_place ? "rk-armed" : "rk-safe"}">auto_place ${rs.auto_place ? "ARMED" : "OFF"}</span>`,
+    `<span class="rk-chip ${st.halted ? "rk-halt" : "rk-ok"}">${st.halted ? "HALTED: " + (st.halt_reason || "") : "not halted"}</span>`,
+    `<span class="rk-chip">${rs.alpaca_enabled ? "Alpaca paper live" : "Alpaca off"}</span>`,
+  ].join("");
+  el.innerHTML = `<div class="rk-head">Risk utilization — algo (Alpaca paper) ${chips}</div>
+    <div class="rk-grid">
+      <div class="rk-stat"><span class="rk-k">equity</span><span class="rk-val">$${fmt(st.equity)}</span></div>
+      <div class="rk-stat"><span class="rk-k">high-water</span><span class="rk-val">$${fmt(st.equity_high_water_mark)}</span></div>
+      <div class="rk-stat"><span class="rk-k">day P&L</span><span class="rk-val">${st.daily_pnl_pct == null ? "—" : st.daily_pnl_pct + "%"} <span class="muted">halt ${st.daily_loss_limit_pct}%</span></span></div>
+      <div class="rk-stat"><span class="rk-k">drawdown</span><span class="rk-val">${st.drawdown_pct == null ? "—" : st.drawdown_pct + "%"} <span class="muted">kill ${st.drawdown_kill_pct}%</span></span></div>
+    </div>
+    <div class="rk-bars">
+      ${bar(rs.open_risk_pct, rs.max_open_risk_pct, "open risk")}
+      ${laneBars}
+      <div class="rb"><div class="rb-l">sector caps</div><div class="rb-sectors">${sectorsOver.length ? sectorsOver.map(([s, n]) => `<b>${scEsc(s)} ${n}/${maxSector}</b>`).join(", ") : "all clear (max " + maxSector + "/sector)"}</div></div>
+    </div>`;
 }
 
 function renderScCoverage(cov) {

@@ -85,3 +85,28 @@ class FinnhubClient:
         frm = date.today()
         return self._get("/calendar/earnings", {"from": frm.isoformat(),
                                                 "to": (frm + timedelta(days=days_ahead)).isoformat()})
+
+    # ---- Addendum 2 small-cap endpoints (free-tier verified 2026-07-12) ----
+    def profile2(self, symbol: str) -> Optional[dict[str, Any]]:
+        """Company profile: shareOutstanding (millions), marketCapitalization,
+        finnhubIndustry, exchange, name. Free tier returns real shares-outstanding
+        (true free-float is NOT available -> callers tier by SO and label SO-proxy)."""
+        return self._get("/stock/profile2", {"symbol": symbol.upper()})
+
+    def basic_financials(self, symbol: str) -> Optional[dict[str, Any]]:
+        """{'metric': {...}, 'series': {...}}. Free tier is rich even for small
+        names: margins, revenue growth, D/E, cash/rev per share -> Quality-Value."""
+        return self._get("/stock/metric", {"symbol": symbol.upper(), "metric": "all"})
+
+    def filings(self, symbol: str, days: int = 180) -> Optional[list[dict[str, Any]]]:
+        """SEC filing METADATA (form, filedDate, reportUrl) -- free tier. Used to
+        flag dilution risk by form type (S-3/424B/ATM). Body text is NOT included,
+        so going-concern language is not checked here (deferred, by design)."""
+        to = date.today()
+        return self._get("/stock/filings", {"symbol": symbol.upper(),
+                                            "from": (to - timedelta(days=days)).isoformat(),
+                                            "to": to.isoformat()})
+
+    # NOTE: /stock/price-target and /stock/option-chain are PREMIUM (HTTP 403 on
+    # free tier, probed 2026-07-12). Deliberately NOT implemented -- the page
+    # renders those as "unavailable" chips rather than fabricating data.

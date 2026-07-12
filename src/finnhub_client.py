@@ -107,6 +107,12 @@ class FinnhubClient:
                                             "from": (to - timedelta(days=days)).isoformat(),
                                             "to": to.isoformat()})
 
+    def us_symbols(self) -> Optional[list[dict[str, Any]]]:
+        """All US-listed symbols (reference data, free tier). Each item has
+        symbol/type/mic/description; the universe builder filters to common
+        stock on NASDAQ/NYSE/AMEX. Cached with a long TTL -- this list is stable."""
+        return self._get("/stock/symbol", {"exchange": "US"})
+
     # NOTE: /stock/price-target and /stock/option-chain are PREMIUM (HTTP 403 on
     # free tier, probed 2026-07-12). Deliberately NOT implemented -- the page
     # renders those as "unavailable" chips rather than fabricating data.

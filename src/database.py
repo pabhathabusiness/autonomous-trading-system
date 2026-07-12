@@ -544,6 +544,80 @@ class Database:
                 best = delta
         return best
 
+    # ------------------------------------------------ Addendum 2: small-cap lane
+    _SC_UNIVERSE_COLS = (
+        "symbol", "updated_at", "price", "exchange", "sector_name", "float_shares",
+        "so_proxy", "float_tier", "avg_dollar_vol_20d", "rel_vol", "bb_percentile",
+        "daily_compression", "compression_extreme", "squeeze_days", "up_wow",
+        "consecutive_up_weeks", "dilution_risk", "upside_to_target_pct", "has_options",
+        "options_liquid", "has_leaps", "signals_json",
+    )
+
+    def upsert_smallcap_universe(self, row: dict[str, Any]) -> None:
+        """Upsert one screened+enriched small-cap. Booleans coerced to 0/1; only
+        known columns are written. updated_at defaults to now if absent."""
+        data = {k: (int(v) if isinstance(v, bool) else v)
+                for k, v in row.items() if k in self._SC_UNIVERSE_COLS}
+        data.setdefault("updated_at", _now())
+        cols = list(data)
+        placeholders = ",".join("?" for _ in cols)
+        updates = ",".join(f"{c}=excluded.{c}" for c in cols if c != "symbol")
+        with self._conn() as conn:
+            conn.execute(
+                f"INSERT INTO smallcap_universe ({','.join(cols)}) VALUES ({placeholders}) "
+                f"ON CONFLICT(symbol) DO UPDATE SET {updates}",
+                [data[c] for c in cols],
+            )
+
+    def get_smallcap_universe(self, *, max_age_hours: Optional[float] = 48,
+                              tier: Optional[str] = None) -> list[dict[str, Any]]:
+        """Fresh universe rows (default: refreshed within 48h), deathwatch already
+        excluded at build time. signals_json is parsed into `signals`."""
+        q = "SELECT * FROM smallcap_universe"
+        clauses, params = [], []
+        if max_age_hours is not None:
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
+            clauses.append("updated_at >= ?"); params.append(cutoff)
+        if tier:
+            clauses.append("float_tier = ?"); params.append(tier)
+        if clauses:
+            q += " WHERE " + " AND ".join(clauses)
+        q += " ORDER BY rel_vol IS NULL, rel_vol DESC"
+        with self._conn() as conn:
+            rows = [dict(r) for r in conn.execute(q, params).fetchall()]
+        for r in rows:
+            try:
+                r["signals"] = json.loads(r.get("signals_json") or "{}")
+            except (TypeError, ValueError):
+                r["signals"] = {}
+        return rows
+
+    def upsert_smallcap_deathwatch(self, symbol: str, reason: str, detail: str = "") -> None:
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO smallcap_deathwatch (symbol, reason, detail, added_at, last_checked)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(symbol) DO UPDATE SET reason=excluded.reason,
+                       detail=excluded.detail, last_checked=excluded.last_checked""",
+                (symbol.upper(), reason, detail, _now(), _now()),
+            )
+
+    def delete_smallcap_deathwatch(self, symbol: str) -> None:
+        """Names exit deathwatch ONLY by aging out of the criteria (builder calls
+        this when a re-check finds no hit) -- never a manual reprieve."""
+        with self._conn() as conn:
+            conn.execute("DELETE FROM smallcap_deathwatch WHERE symbol = ?", (symbol.upper(),))
+
+    def is_on_deathwatch(self, symbol: str) -> bool:
+        with self._conn() as conn:
+            return conn.execute("SELECT 1 FROM smallcap_deathwatch WHERE symbol = ?",
+                                (symbol.upper(),)).fetchone() is not None
+
+    def get_smallcap_deathwatch(self) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            return [dict(r) for r in conn.execute(
+                "SELECT * FROM smallcap_deathwatch ORDER BY added_at DESC").fetchall()]
+
     def get_proposals(self, status: Optional[str] = None, account_type: Optional[str] = None) -> list[dict[str, Any]]:
         # proposals.direction is authoritative as of 2026-07-11 (Lane 1.4): written
         # at insert time for new rows, backfilled for all 284 older rows. No

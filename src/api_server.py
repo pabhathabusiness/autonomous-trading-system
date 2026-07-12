@@ -913,17 +913,20 @@ def _hold_days(t: dict[str, Any]) -> Optional[float]:
         return None
 
 
-def _smallcap_lane_stats(trades: list[dict[str, Any]]) -> dict[str, Any]:
+def _smallcap_lane_stats(trades: list[dict[str, Any]], r_of=None) -> dict[str, Any]:
     """Per-lane record: n, win rate, expectancy (R), avg hold, best/worst R, plus
-    a max-drawdown-in-R and the graduation verdict. Aggregate EXCLUDES hailmary."""
+    a max-drawdown-in-R and the graduation verdict. `r_of` selects the R source --
+    default is the sim r_multiple; the REAL (Alpaca) book passes real_r_multiple so
+    graduation is decided on real fills, not the sim's claim."""
     from collections import defaultdict
+    r_of = r_of or _r_multiple
     by_lane: dict[str, list] = defaultdict(list)
     for t in trades:
         by_lane[t.get("lane") or "?"].append(t)
 
     def stats_for(rows: list[dict[str, Any]]) -> dict[str, Any]:
         closed = [t for t in rows if t.get("status") == "closed"]
-        rs = [r for r in (_r_multiple(t) for t in closed) if r is not None]
+        rs = [r for r in (r_of(t) for t in closed) if r is not None]
         wins = sum(1 for t in closed if t.get("outcome") == "win")
         holds = [h for h in (_hold_days(t) for t in closed) if h is not None]
         # max drawdown in R over the closed sequence (entry-date order)
@@ -991,8 +994,14 @@ def smallcap_record(lane: Optional[str] = None, status: Optional[str] = None) ->
     trades = DB.get_smallcap_trades(status=status, lane=lane)
     for t in trades:
         t["r_multiple"] = _r_multiple(t)
-    stats = _smallcap_lane_stats(DB.get_smallcap_trades())   # stats over the FULL book
-    return {"count": len(trades), "trades": trades, **stats}
+    stats = _smallcap_lane_stats(DB.get_smallcap_trades())    # SIM book (book='smallcap')
+    # REAL feedback: per-lane expectancy + graduation over the actual Alpaca fills
+    # (book='algo'), scored on real_r_multiple -- the learnings that decide, on
+    # REAL fills, which lanes graduate. Closes the trigger->...->learnings loop.
+    real = _smallcap_lane_stats(DB.get_algo_book_trades(),
+                                r_of=lambda t: t.get("real_r_multiple"))
+    return {"count": len(trades), "trades": trades, **stats,
+            "real_lanes": real["lanes"], "real_graduation": real["graduation"]}
 
 
 @app.post("/api/smallcap/scan")

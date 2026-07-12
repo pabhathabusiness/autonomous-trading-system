@@ -1305,6 +1305,15 @@ class Database:
                 f"SELECT * FROM paper_trades WHERE {self._OPEN_REAL}", (account_type,)).fetchall()
             return [dict(r) for r in rows]
 
+    def get_algo_book_trades(self) -> list[dict[str, Any]]:
+        """ALL real (is_real=1) algo-book trades, open + closed, for the per-lane
+        REAL expectancy / graduation feedback (distinct from the smallcap SIM book)."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM paper_trades WHERE book = 'algo' AND is_real = 1 "
+                "ORDER BY entry_date DESC").fetchall()
+            return [dict(r) for r in rows]
+
     def close_algo_trade(self, trade_id: int, *, exit_price: float, exit_reason: str,
                          outcome: Optional[str] = None, **fields: Any) -> None:
         """Close a real algo trade on its REAL Alpaca exit fill (not sim replay).

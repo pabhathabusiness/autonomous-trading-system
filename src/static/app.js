@@ -1204,7 +1204,8 @@ const SC_THESIS = {
   emerging_strength: "Early in a move with a sector tailwind, before it's obvious.",
   hidden_value: "Cheap, real, and uncovered — a business the tape hasn't noticed.",
   turnaround: "A fundamental inflection forming before the re-rating.",
-  all: "Every triggered lane, ranked by composite.", record: "Per-lane track record." };
+  all: "Every triggered lane, ranked by composite.", record: "Per-lane track record.",
+  simreal: "What the sim claimed vs what really filled — slippage and P&L drift on real Alpaca fills." };
 
 async function loadSmallcaps() {
   try {
@@ -1244,12 +1245,45 @@ function renderScStatus(d) {
 function scSetLane(lane) {
   scLane = lane;
   document.querySelectorAll(".sc-tab").forEach(t => t.classList.toggle("active", t.dataset.lane === lane));
-  const rec = lane === "record";
+  const rec = lane === "record", sr = lane === "simreal", special = rec || sr;
   $("sc-record").style.display = rec ? "" : "none";
-  $("sc-cards").style.display = rec ? "none" : "";
-  $("sc-side-blocks").style.display = rec ? "none" : "";
+  if ($("sc-simreal")) $("sc-simreal").style.display = sr ? "" : "none";
+  $("sc-cards").style.display = special ? "none" : "";
+  $("sc-side-blocks").style.display = special ? "none" : "";
   $("sc-thesis").textContent = SC_THESIS[lane] || "";
-  if (rec) loadScRecord(); else renderScCards();
+  if (rec) loadScRecord(); else if (sr) loadScSimReal(); else renderScCards();
+}
+
+async function loadScSimReal() {
+  const el = $("sc-simreal");
+  el.innerHTML = `<p class="muted">Loading…</p>`;
+  let d;
+  try { d = await fetchJSON("/api/sim_vs_real"); } catch (e) { el.innerHTML = `<p class="muted">${scEsc(e.message)}</p>`; return; }
+  const rows = d.trades || [];
+  if (!rows.length) {
+    el.innerHTML = `<div class="sc-disabled" style="border-color:var(--border);color:var(--muted);background:transparent">` +
+      `<b>No real fills yet.</b> This table fills once auto_place is on and the first Alpaca paper orders fill. ` +
+      `It's the whole reason we moved to Alpaca: each row shows what the SIM claimed vs what REALLY filled — ` +
+      `entry slippage, exit slippage, and the P&L / R gap — so you can see how much the simulation was lying.</div>`;
+    return;
+  }
+  const bps = (v) => v == null ? "—" : `<span class="${v > 0 ? 'sr-neg' : v < 0 ? 'sr-pos' : ''}">${v > 0 ? '+' : ''}${v} bps</span>`;
+  const money = (v) => v == null ? "—" : `<span class="${v >= 0 ? 'sr-pos' : 'sr-neg'}">${v >= 0 ? '+' : ''}$${Math.abs(v).toLocaleString()}</span>`;
+  const body = rows.map(t => `<tr>
+    <td>${scEsc(t.symbol)}</td><td>${SC_LANE_LABEL[t.lane] || t.lane || "—"}</td>
+    <td>${t.status === "closed" ? "closed" : "open"}</td>
+    <td>${t.sim_entry ?? "—"}</td><td>${t.real_entry ?? "—"}</td><td>${bps(t.slippage_bps)}</td>
+    <td>${t.sim_exit ?? "—"}</td><td>${t.real_exit ?? "—"}</td><td>${bps(t.exit_slippage_bps)}</td>
+    <td>${money(t.sim_pnl_usd)}</td><td>${money(t.real_pnl_usd)}</td>
+    <td>${t.sim_r_multiple ?? "—"}</td><td>${t.real_r_multiple ?? "—"}</td>
+    <td>${t.gap_through_stop ? '<b class="sr-neg">gap</b>' : ""}${t.partial_fill ? " partial" : ""}${t.was_rejected ? " rej" : ""}</td>
+  </tr>`).join("");
+  el.innerHTML = `<p class="muted" style="margin:4px 0 10px">Sim vs real — the first ${rows.length} real Alpaca fills. ` +
+    `Negative slippage / a real P&L below sim = the simulation was optimistic.</p>` +
+    `<div style="overflow-x:auto"><table class="sc-rec-table sr-table"><thead><tr>` +
+    `<th>sym</th><th>lane</th><th>status</th><th>sim in</th><th>real in</th><th>slip</th>` +
+    `<th>sim out</th><th>real out</th><th>slip</th><th>sim $</th><th>real $</th><th>sim R</th><th>real R</th><th>flags</th>` +
+    `</tr></thead><tbody>${body}</tbody></table></div>`;
 }
 
 function renderScCards() {
@@ -1424,27 +1458,36 @@ async function loadScRecord() {
   el.innerHTML = "Loading…";
   try {
     const d = await fetchJSON("/api/smallcap/record");
-    const L = d.lanes || {}, G = d.graduation || {};
-    const rowFor = (k) => {
-      const s = L[k]; if (!s) return "";
-      const label = k === "aggregate" ? "AGGREGATE" : (SC_LANE_LABEL[k] || k);
-      const exp = s.expectancy_r == null ? "-" : signed(s.expectancy_r, 2) + "R";
-      return `<tr class="${k === "aggregate" ? "sc-rec-agg" : ""}">
-        <td>${label}</td><td>${s.n_closed}</td><td>${s.n_open}</td>
-        <td>${s.win_rate == null ? "-" : (s.win_rate * 100).toFixed(0) + "%"}</td>
-        <td class="${(s.expectancy_r || 0) >= 0 ? "pos" : "neg"}">${exp}</td>
-        <td>${s.avg_hold_days == null ? "-" : s.avg_hold_days + "d"}</td>
-        <td class="pos">${s.best_r == null ? "-" : "+" + s.best_r + "R"}</td>
-        <td class="neg">${s.worst_r == null ? "-" : s.worst_r + "R"}</td>
-        <td>${s.max_dd_r}R</td>
-        <td class="sc-grad">${scEsc(G[k] || "")}</td></tr>`;
-    };
-    const tbl = `<div class="block-head"><h3>Which lane is actually mine?</h3>
-      <span class="sub">the whole point — per-lane, never blended (HM excluded from AGG)</span></div>
-      <table class="sc-rec-table"><thead><tr>
+    const laneTable = (L, G) => {
+      const rowFor = (k) => {
+        const s = (L || {})[k]; if (!s) return "";
+        const label = k === "aggregate" ? "AGGREGATE" : (SC_LANE_LABEL[k] || k);
+        const exp = s.expectancy_r == null ? "-" : signed(s.expectancy_r, 2) + "R";
+        return `<tr class="${k === "aggregate" ? "sc-rec-agg" : ""}">
+          <td>${label}</td><td>${s.n_closed}</td><td>${s.n_open}</td>
+          <td>${s.win_rate == null ? "-" : (s.win_rate * 100).toFixed(0) + "%"}</td>
+          <td class="${(s.expectancy_r || 0) >= 0 ? "pos" : "neg"}">${exp}</td>
+          <td>${s.avg_hold_days == null ? "-" : s.avg_hold_days + "d"}</td>
+          <td class="pos">${s.best_r == null ? "-" : "+" + s.best_r + "R"}</td>
+          <td class="neg">${s.worst_r == null ? "-" : s.worst_r + "R"}</td>
+          <td>${s.max_dd_r}R</td>
+          <td class="sc-grad">${scEsc((G || {})[k] || "")}</td></tr>`;
+      };
+      return `<table class="sc-rec-table"><thead><tr>
         <th>Lane</th><th>closed</th><th>open</th><th>win</th><th>exp</th><th>hold</th>
         <th>best</th><th>worst</th><th>maxDD</th><th>graduation</th></tr></thead>
       <tbody>${SC_LANES_ORDER.map(rowFor).join("")}</tbody></table>`;
+    };
+    const realClosed = Object.values(d.real_lanes || {}).reduce((a, s) => a + (s.n_closed || 0), 0);
+    const tbl = `<div class="block-head"><h3>Real fills — Alpaca (the record that counts)</h3>
+      <span class="sub">book='algo' · real paper fills · graduation decided on REAL R, not the sim's claim</span></div>` +
+      (realClosed ? laneTable(d.real_lanes, d.real_graduation)
+        : `<p class="muted" style="margin:6px 0 16px">No real fills closed yet. Once auto_place is on and Alpaca fills close, ` +
+          `each lane's REAL expectancy accumulates here and graduation (n≥20, ≥+0.10R) is decided on real fills. ` +
+          `The sim book below is what it CLAIMED.</p>`) +
+      `<div class="block-head" style="margin-top:18px"><h3>Sim book (what it claimed)</h3>
+      <span class="sub">book='smallcap' · per-lane, never blended (HM excluded from AGG)</span></div>` +
+      laneTable(d.lanes, d.graduation);
     const trades = (d.trades || []).slice(0, 60).map(t => `<tr>
         <td>${scEsc(t.symbol)}</td><td>${SC_LANE_LABEL[t.lane] || t.lane}</td>
         <td>${price(t.entry_price)}</td><td>${price(t.stop_loss)}</td><td>${price(t.target_price)}</td>

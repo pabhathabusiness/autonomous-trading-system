@@ -27,3 +27,4 @@ cloudflared.exe
 *.exe
 *.pickle
 .claude/launch.json
+backups/

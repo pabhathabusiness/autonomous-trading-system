@@ -107,7 +107,8 @@ def _execute_one(db, alpaca, risk_mgr, config, c: dict[str, Any],
         sector_counts=db.count_open_by_sector(account_type),
         lane_notional=db.open_notional_by_lane(account_type),
         halted=risk_state.is_halted(db, account_type),
-        avg_dollar_vol=c.get("avg_dollar_vol"), rel_vol=c.get("rel_vol"))
+        avg_dollar_vol=c.get("avg_dollar_vol"), rel_vol=c.get("rel_vol"),
+        days_to_earnings=c.get("days_to_earnings"))
     decision = risk_gate.evaluate(ctx)
     if not decision.approved:
         return {"symbol": symbol, "outcome": "refused", "reason": decision.reason,

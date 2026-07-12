@@ -33,6 +33,7 @@ from src import mtf_bias
 from src import news_refresher
 from src import smallcap_scan
 from src import risk_state
+from src import smallcap_universe as scu
 from src.finnhub_client import FinnhubClient
 from src import paper_trader
 from src.scheduler import AutonomousScheduler
@@ -974,6 +975,15 @@ def smallcap_universe(tier: Optional[str] = None) -> dict[str, Any]:
 def smallcap_deathwatch() -> dict[str, Any]:
     rows = DB.get_smallcap_deathwatch()
     return {"count": len(rows), "deathwatch": rows}
+
+
+@app.get("/api/smallcap/coverage")
+def smallcap_coverage() -> dict[str, Any]:
+    """GATE 1 data-health surface: per Stage-2 endpoint attempted/succeeded/
+    rate-limited/empty over the shortlist, + the shortlist cutoff composite.
+    Invisible data starvation should never again be discovered by accident."""
+    rep = scu.latest_coverage(DB)
+    return rep or {"endpoints": {}, "shortlist": 0, "note": "no Stage-2 build yet"}
 
 
 @app.get("/api/smallcap/record")

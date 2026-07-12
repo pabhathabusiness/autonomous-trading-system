@@ -24,7 +24,7 @@ are deferred: filing body text isn't on free tier and SO history has to accrue.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 import pandas as pd
@@ -45,11 +45,48 @@ _ALLOWED_MICS = {"XNAS", "XNYS", "XASE", "ARCX", "BATS"}   # NASDAQ/NYSE/AMEX fa
 _PROFILE_TTL_S = 7 * 24 * 3600
 _FIN_TTL_S = 3 * 24 * 3600
 _INSIDER_TTL_S = 3 * 24 * 3600     # A4 P11 cache budget
+_NEWS_TTL_S = 12 * 3600            # GATE 1: news is time-sensitive -> short TTL, but
+                                   # cached within a day so coverage accumulates
+_EARNINGS_TTL_S = 7 * 24 * 3600    # GATE 1: earnings dates move rarely
 _SYMBOLS_TTL_S = 7 * 24 * 3600
 _SYMBOLS_KEY = "sc:us_symbols"
+_COVERAGE_KEY = "sc:coverage"      # GATE 1: last build's Stage-2 coverage report
+_SHORTLIST_SIZE = 100              # GATE 1: Stage-2 (insider/catalyst/earnings) fan-out
+# GATE 1: Stage-2 endpoints. Randomizing their per-run order (and logging it) means
+# queue position never silently decides which signals exist for a name.
+_STAGE2_ENDPOINTS = ("insider", "catalyst", "earnings", "filings")
 
 
 # ---------------------------------------------------------------- pure helpers
+def days_to_earnings(payload: Optional[dict[str, Any]]) -> Optional[int]:
+    """Days to the NEXT upcoming earnings date from a Finnhub earnings-calendar
+    payload. None => UNKNOWN (fetch failed OR no scheduled date) -- the B3 earnings
+    guard fails closed on None. A successful-but-empty calendar also yields None,
+    but fetch_status distinguishes the two (empty vs unavailable)."""
+    if not payload:
+        return None
+    cal = payload.get("earningsCalendar") or payload.get("earnings") or []
+    today = date.today()
+    upcoming = []
+    for e in cal:
+        try:
+            ed = date.fromisoformat(str(e.get("date"))[:10])
+        except (ValueError, TypeError):
+            continue
+        if ed >= today:
+            upcoming.append((ed - today).days)
+    return min(upcoming) if upcoming else None
+
+
+def _fetch_status(val: Any, empty: bool) -> str:
+    """GATE 1/2 tri-state: 'unavailable' (fetch failed/None), 'empty' (searched, no
+    data), or 'ok' (searched, has data). Persisted per symbol so blindness is
+    distinguishable in the DB, never conflated with a zero."""
+    if val is None:
+        return "unavailable"
+    return "empty" if empty else "ok"
+
+
 def float_est_m(so_m: Optional[float]) -> Optional[float]:
     """SO-proxy inflates true float; F3/A3 1.1 documented 0.85 haircut, for TIER
     DISPLAY ONLY. The field is labeled 'SO-proxy (est)' -- never presented as true float."""
@@ -269,9 +306,18 @@ def candidate_symbols(db: Database, fh: FinnhubClient) -> list[str]:
 # ---------------------------------------------------------------- enrich one
 def enrich_symbol(db: Database, fh: FinnhubClient, symbol: str,
                   df: Optional[pd.DataFrame] = None,
-                  splits: Optional[pd.Series] = None) -> dict[str, Any]:
+                  splits: Optional[pd.Series] = None, *,
+                  stage2: bool = True,
+                  endpoint_order: Optional[list[str]] = None) -> dict[str, Any]:
     """Screen + enrich one symbol. Returns {status, symbol, [row]}. status is one
-    of: added | deathwatch | skip_price | skip_liquidity | skip_float | skip_data."""
+    of: added | deathwatch | skip_price | skip_liquidity | skip_float | skip_data.
+
+    GATE 1 two-stage: STAGE 1 (stage2=False) does the yfinance OHLC screen +
+    profile + fundamentals (universe-wide, cheap-per-cache). STAGE 2 (stage2=True,
+    shortlist only) additionally fetches insider / catalyst / earnings / filings in
+    `endpoint_order` (randomized per run so queue position never decides coverage).
+    A Stage-1 row carries the Stage-2 families as UNAVAILABLE with fetch_status
+    'pending' -- never as a zero."""
     import yfinance as yf
     if df is None:
         tk = yf.Ticker(symbol)
@@ -295,29 +341,52 @@ def enrich_symbol(db: Database, fh: FinnhubClient, symbol: str,
     if db.is_on_deathwatch(symbol):
         db.delete_smallcap_deathwatch(symbol)   # aged out of the criteria
 
+    # ---- STAGE 1 (universe-wide): profile (float) + fundamentals ----
     prof = _cached(db, f"sc:profile2:{symbol}", _PROFILE_TTL_S, lambda: fh.profile2(symbol)) or {}
     so_m = prof.get("shareOutstanding")
     fl_est = float_est_m(so_m)              # SO-proxy 0.85 haircut, tier display only
     tier = float_tier(fl_est)
     ptier = price_tier(price)
-    # F3: float is NEVER a universe gate. A name with tier None (>1B float) is
-    # still stored -- it simply won't match any lane's float ceiling, so it never
-    # triggers. Nothing is skipped for being "too big".
-
-    filings = _cached(db, f"sc:filings:{symbol}", _FIN_TTL_S, lambda: fh.filings(symbol, 180))
-    dilution_risk, dil_forms = dilution_from_filings(filings)
     bf = _cached(db, f"sc:fin:{symbol}", _FIN_TTL_S, lambda: fh.basic_financials(symbol)) or {}
     metric = bf.get("metric", {}) or {}
     series = bf.get("series", {}) or {}
-    news = fh.company_news(symbol, days=7)
+    r52 = edges.range52_beta(metric, price)
+
+    # ---- STAGE 2 (shortlist only): insider / catalyst / earnings / filings ----
+    # Defaults = UNAVAILABLE (None) so a Stage-1 row's thesis families are excluded,
+    # never scored as zero. Fetched in `endpoint_order` so no endpoint is always last.
+    news = txns = filings = earn = None
+    if stage2:
+        for ep in (endpoint_order or list(_STAGE2_ENDPOINTS)):
+            if ep == "insider":
+                txns = _cached(db, f"sc:insider:{symbol}", _INSIDER_TTL_S,
+                               lambda: fh.insider_transactions(symbol))
+            elif ep == "catalyst":
+                news = _cached(db, f"sc:news:{symbol}", _NEWS_TTL_S,
+                               lambda: fh.company_news(symbol, days=7))
+            elif ep == "earnings":
+                earn = _cached(db, f"sc:earn:{symbol}", _EARNINGS_TTL_S,
+                               lambda: fh.earnings_for_symbol(symbol))
+            elif ep == "filings":
+                filings = _cached(db, f"sc:filings:{symbol}", _FIN_TTL_S,
+                                  lambda: fh.filings(symbol, 180))
+
     now_ts = datetime.now(timezone.utc).timestamp()
     catalyst = catalyst_from_news(news, now_ts, 48)
-    # A4: classify news polarity (offering/going_concern are NOT positive catalysts)
-    news_class = edges.classify_news(news, now_ts, window_days=7)
-    txns = _cached(db, f"sc:insider:{symbol}", _INSIDER_TTL_S, lambda: fh.insider_transactions(symbol))
-    insider = edges.insider_score((txns or {}).get("data") if isinstance(txns, dict) else None,
-                                  market_cap_m=prof.get("marketCapitalization"))
-    r52 = edges.range52_beta(metric, price)
+    news_class = edges.classify_news(news, now_ts, window_days=7)   # None -> neutral/0
+    insider_data = (txns or {}).get("data") if isinstance(txns, dict) else None
+    insider = edges.insider_score(insider_data, market_cap_m=prof.get("marketCapitalization"))
+    dilution_risk, dil_forms = dilution_from_filings(filings)
+    dte = days_to_earnings(earn)
+
+    # GATE 1/2: per-Stage-2-family fetch status, persisted so the DB distinguishes
+    # unavailable (fetch failed) from empty (searched, nothing) -- never conflated.
+    fetch_status = {
+        "insider": _fetch_status(txns, empty=(insider_data == [])),
+        "catalyst": _fetch_status(news, empty=(news == [])),
+        "earnings": _fetch_status(earn, empty=(earn is not None and dte is None)),
+        "filings": _fetch_status(filings, empty=(filings == [])),
+    } if stage2 else {ep: "pending" for ep in _STAGE2_ENDPOINTS}
 
     signals_blob = {
         "ohlc": sig,
@@ -325,9 +394,7 @@ def enrich_symbol(db: Database, fh: FinnhubClient, symbol: str,
         "fundamentals": value_fundamentals(metric, so_m),
         "catalyst": catalyst,
         "catalyst_class": {"weight": news_class["weight"], "type": news_class["type"]},
-        # available = the feed was SEARCHED (even if empty). A searched-but-empty feed
-        # is available-and-zero (a drag in the denominator), NOT "no data". Only a
-        # failed/disabled fetch (news is None) is truly unavailable. (floodgate fix)
+        # news_available = the feed was SEARCHED (None => unavailable, [] => empty/drag)
         "news_available": news is not None,
         "going_concern": news_class["going_concern"],
         "insider": insider,
@@ -337,6 +404,9 @@ def enrich_symbol(db: Database, fh: FinnhubClient, symbol: str,
         "beta": r52["beta"],
         "reverse_split": ss.reverse_split_flags(splits),
         "dilution_forms": dil_forms,
+        "days_to_earnings": dte,         # None => UNKNOWN (B3 earnings guard fails closed)
+        "fetch_status": fetch_status,
+        "stage2_enriched": bool(stage2),
     }
     delisting_risk = 1 if (sig.get("sub_dollar_streak") or 0) > 20 else 0
     signals_blob["delisting_risk"] = delisting_risk
@@ -366,7 +436,8 @@ def enrich_symbol(db: Database, fh: FinnhubClient, symbol: str,
     }
     db.upsert_smallcap_universe(row)
     return {"status": "added", "symbol": symbol, "tier": tier, "price": price,
-            "dilution_risk": dilution_risk, "catalyst": bool(catalyst)}
+            "dilution_risk": dilution_risk, "catalyst": bool(catalyst),
+            "stage2": bool(stage2), "row": {**row, "signals": signals_blob}}
 
 
 # ---------------------------------------------------------------- full build
@@ -412,21 +483,106 @@ def build_universe(db: Database, fh: FinnhubClient, *, symbols: Optional[list[st
     counts["price_vol_survivors"] = len(survivors)
     if max_enrich:
         survivors = survivors[:max_enrich]
-    for sym, sub in survivors:
+
+    def _splits_of(sub: pd.DataFrame):
         try:
-            # splits come from the batch's "Stock Splits" column (non-zero = a
-            # split event); resilient to the column being absent
-            splits = None
-            try:
-                if "Stock Splits" in sub:
-                    ss = sub["Stock Splits"]
-                    splits = ss[ss != 0]
-            except Exception:
-                splits = None
-            r = enrich_symbol(db, fh, sym, df=sub, splits=splits)
+            if "Stock Splits" in sub:
+                s = sub["Stock Splits"]
+                return s[s != 0]
+        except Exception:
+            pass
+        return None
+
+    import random
+    from src import smallcap_lanes as _L
+
+    # ---- STAGE 1 (universe-wide): profile + fundamentals; thesis families left
+    # UNAVAILABLE. Rank survivors by a permissive prescore to pick the shortlist. ----
+    sub_map: dict[str, tuple] = {}
+    ranked: list[tuple[str, float]] = []
+    for sym, sub in survivors:
+        splits = _splits_of(sub)
+        sub_map[sym] = (sub, splits)
+        try:
+            r = enrich_symbol(db, fh, sym, df=sub, splits=splits, stage2=False)
             counts[r["status"]] = counts.get(r["status"], 0) + 1
+            if r["status"] == "added":
+                ranked.append((sym, _L.stage1_prescore(r["row"])))
         except Exception as exc:
-            logger.debug("enrich %s failed: %s", sym, exc)
+            logger.debug("stage1 %s failed: %s", sym, exc)
             counts["error"] = counts.get("error", 0) + 1
+
+    ranked.sort(key=lambda x: -x[1])
+    shortlist = ranked[:_SHORTLIST_SIZE]
+    cutoff = (shortlist[-1][1] if len(shortlist) >= _SHORTLIST_SIZE
+              else (ranked[-1][1] if ranked else 0.0))
+    logger.info("GATE1 shortlist cut: %d added -> top %d for Stage 2; cutoff composite "
+                "(the %dth name)=%.2f  [a HIGH cutoff means the shortlist is too small and "
+                "good candidates never get their insider/catalyst data]",
+                len(ranked), len(shortlist), len(shortlist), cutoff)
+
+    # ---- STAGE 2 (shortlist only): insider/catalyst/earnings/filings in a
+    # RANDOMIZED, LOGGED endpoint order so queue position never decides coverage. ----
+    fh.reset_call_stats()
+    order = list(_STAGE2_ENDPOINTS)
+    random.shuffle(order)
+    logger.info("GATE1 Stage-2 endpoint order this run: %s", order)
+    for sym, _score in shortlist:
+        sub, splits = sub_map.get(sym, (None, None))
+        try:
+            enrich_symbol(db, fh, sym, df=sub, splits=splits, stage2=True, endpoint_order=order)
+        except Exception as exc:
+            logger.debug("stage2 %s failed: %s", sym, exc)
+            counts["stage2_error"] = counts.get("stage2_error", 0) + 1
+
+    # ---- coverage report: the permanent health surface + the lane-re-enable input ----
+    report = coverage_report(db, [s for s, _ in shortlist], fh.call_stats,
+                             endpoint_order=order, cutoff=cutoff)
+    db.cache_put(_COVERAGE_KEY, report)
+    counts["shortlist"] = len(shortlist)
+    counts["shortlist_cutoff_composite"] = round(cutoff, 2)
+    counts["coverage_pct"] = {ep: report["endpoints"][ep]["coverage_pct"]
+                              for ep in report["endpoints"]}
     logger.info("smallcap build done: %s", counts)
     return counts
+
+
+_EP_PATH = {"insider": "/stock/insider-transactions", "catalyst": "/company-news",
+            "earnings": "/calendar/earnings", "filings": "/stock/filings"}
+
+
+def coverage_report(db: Database, shortlist_syms: list[str], call_stats: dict,
+                    *, endpoint_order: Optional[list[str]] = None,
+                    cutoff: Optional[float] = None) -> dict[str, Any]:
+    """GATE 1 health surface. Per Stage-2 endpoint over the shortlist:
+    attempted / succeeded / empty / unavailable (from persisted fetch_status) plus
+    this run's rate_limited / error call counts. DEGRADED when coverage < 80%."""
+    rows = {r["symbol"]: r for r in db.get_smallcap_universe(max_age_hours=None)}
+    n = len(shortlist_syms)
+    endpoints: dict[str, Any] = {}
+    for ep in _STAGE2_ENDPOINTS:
+        ok = empty = unavail = 0
+        for s in shortlist_syms:
+            fs = ((rows.get(s) or {}).get("signals") or {}).get("fetch_status") or {}
+            st = fs.get(ep, "pending")
+            if st == "ok":
+                ok += 1
+            elif st == "empty":
+                empty += 1
+            else:
+                unavail += 1
+        got = ok + empty
+        cov = round(100 * got / n, 1) if n else 0.0
+        cs = call_stats.get(_EP_PATH[ep], {})
+        endpoints[ep] = {"attempted": n, "succeeded": ok, "empty": empty,
+                         "unavailable": unavail, "coverage_pct": cov,
+                         "rate_limited": cs.get("rate_limited", 0), "error": cs.get("error", 0),
+                         "degraded": cov < 80.0}
+    return {"as_of": datetime.now(timezone.utc).isoformat(), "shortlist": n,
+            "endpoint_order": endpoint_order or list(_STAGE2_ENDPOINTS),
+            "shortlist_cutoff_composite": round(cutoff, 2) if cutoff is not None else None,
+            "endpoints": endpoints}
+
+
+def latest_coverage(db: Database) -> Optional[dict[str, Any]]:
+    return (db.cache_get(_COVERAGE_KEY) or {}).get("payload")

@@ -15,14 +15,15 @@ Every control FAILS CLOSED: if an input needed to evaluate a control is missing
 (no equity read, no ADV, unknown sector), that control FAILS and the trade is
 refused. There is no "allow on doubt" path.
 
-The seven controls:
-  0. not_halted     -- daily-loss / drawdown kill-switch is not tripped
-  1. position_sizing-- valid risk-based size (equity, stop distance, >=1 share)
-  2. max_open_risk  -- existing open risk + this trade <= max_open_risk_pct (5%)
-  3. per_lane_cap   -- lane open notional + this trade <= per_lane_cap_pct (30%)
-  4. sector_cap     -- open positions in this sector < max_positions_per_sector (3)
-  5. liquidity      -- price floor, min ADV$, order participation <= max % of ADV
-  (position sizing itself is control 1; the seventh is the halt gate, control 0)
+The controls:
+  0. not_halted        -- daily-loss / drawdown kill-switch is not tripped
+  1. position_sizing   -- valid risk-based size (equity, stop distance, >=1 share)
+  2. max_open_risk     -- existing open risk + this trade <= max_open_risk_pct (5%)
+  3. per_lane_cap      -- lane open notional + this trade <= per_lane_cap_pct (30%)
+  4. sector_cap        -- open positions in this sector < max_positions_per_sector (3)
+  5. liquidity         -- price floor, min ADV$, order participation <= max % of ADV
+  6. earnings_proximity-- not within earnings_blackout_days of earnings; UNKNOWN
+                          earnings date fails CLOSED (refuse)
 """
 from __future__ import annotations
 
@@ -55,6 +56,8 @@ class RiskContext:
     # liquidity inputs
     avg_dollar_vol: Optional[float] = None
     rel_vol: Optional[float] = None
+    # B3 earnings guard: days to next earnings. None => UNKNOWN => refuse (fail closed).
+    days_to_earnings: Optional[int] = None
 
 
 @dataclass
@@ -142,6 +145,16 @@ def evaluate(ctx: RiskContext) -> RiskDecision:
             liq_ok = False
             why.append(f"participation {part:.2f}% > {max_part}%")
     check("liquidity", liq_ok, "; ".join(why) or "ok")
+
+    # 6. earnings-proximity blackout. FAILS CLOSED on unknown: an unknown earnings
+    # date (fetch failed) is not "clear of earnings" -- it's "we can't confirm", so
+    # we refuse. Enforceable only because GATE 1 fetches per-symbol earnings.
+    blackout = int(r.get("earnings_blackout_days", 2))
+    dte = ctx.days_to_earnings
+    earnings_ok = dte is not None and dte > blackout
+    check("earnings_proximity", earnings_ok,
+          "earnings date unknown (fail closed)" if dte is None
+          else f"earnings in {dte}d <= {blackout}d blackout")
 
     approved = all(checks.values())
     reason = "approved" if approved else " | ".join(fails)

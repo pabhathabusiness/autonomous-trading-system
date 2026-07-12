@@ -56,6 +56,7 @@
     "liquidity_max_adv_participation_pct": 1.0,
     "liquidity_min_price": 0.20,
     "liquidity_min_dollar_vol": 300000,
+    "earnings_blackout_days": 2,
     "note": "Portfolio-level risk gate for Alpaca PAPER order placement (B3). Every control fails CLOSED: a missing input REFUSES the trade. max_open_risk = sum of open+pending position risk as pct of equity; daily_loss halts new opens at -2% of day-start equity; drawdown_kill halts ALL opens at -10% below the equity high-water mark (persists across restart); per_lane_cap = max open notional per lane as pct of equity; max_positions_per_sector is the correlation cap; liquidity guard bounds order size vs ADV and floors price/dollar-volume."
   },
   "smallcap": {

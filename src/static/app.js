@@ -1208,13 +1208,15 @@ const SC_THESIS = {
 
 async function loadSmallcaps() {
   try {
-    const [tr, uni, dw] = await Promise.all([
+    const [tr, uni, dw, cov] = await Promise.all([
       fetchJSON("/api/smallcap/triggers"),
       fetchJSON("/api/smallcap/universe").catch(() => ({ coiled: [] })),
       fetchJSON("/api/smallcap/deathwatch").catch(() => ({ deathwatch: [] })),
+      fetchJSON("/api/smallcap/coverage").catch(() => null),
     ]);
     scCache = tr;
     renderScStatus(tr);
+    renderScCoverage(cov);
     markScDisabledTabs();
     renderScSectorHeat(tr.sector_heat || {});
     renderScCoiled(uni.coiled || []);
@@ -1271,6 +1273,30 @@ function renderScCards() {
     return;
   }
   wrap.innerHTML = rows.map(scCard).join("");
+}
+
+function renderScCoverage(cov) {
+  const el = $("sc-coverage");
+  if (!el) return;
+  const eps = cov && cov.endpoints ? cov.endpoints : null;
+  if (!eps || !Object.keys(eps).length) {
+    el.innerHTML = `<span class="muted">Data coverage: no Stage-2 build yet.</span>`;
+    return;
+  }
+  const order = (cov.endpoint_order || []).join(" → ");
+  const cells = Object.entries(eps).map(([name, e]) => {
+    const cls = e.degraded ? "cov-bad" : (e.coverage_pct >= 90 ? "cov-good" : "cov-warn");
+    const rl = e.rate_limited ? ` · <span class="cov-rl">${e.rate_limited} rate-limited</span>` : "";
+    return `<div class="cov-cell ${cls}" title="attempted ${e.attempted} · succeeded ${e.succeeded} · empty ${e.empty} · unavailable ${e.unavailable} · rate-limited ${e.rate_limited} · error ${e.error}">
+      <span class="cov-name">${scEsc(name)}</span>
+      <span class="cov-pct">${e.coverage_pct}%</span>
+      <span class="cov-detail">${e.succeeded} ok · ${e.empty} empty · ${e.unavailable} n/a${rl}${e.degraded ? ' · <b>DEGRADED</b>' : ''}</span>
+    </div>`;
+  }).join("");
+  const cut = cov.shortlist_cutoff_composite;
+  el.innerHTML = `<div class="cov-head">Stage-2 data coverage — shortlist of ${cov.shortlist}` +
+    (cut != null ? ` · cutoff composite ${cut}` : "") +
+    (order ? ` · order ${scEsc(order)}` : "") + `</div><div class="cov-grid">${cells}</div>`;
 }
 
 function markScDisabledTabs() {

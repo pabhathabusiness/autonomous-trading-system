@@ -449,6 +449,20 @@ table.track .feedback { max-width: 230px; font-size: 12px; }
 .sc-disabled { background: rgba(214,158,46,.10); border: 1px solid var(--amber, #d69e2e);
   color: var(--amber, #d69e2e); border-radius: 10px; padding: 14px 16px; font-size: 13px;
   line-height: 1.5; }
+/* GATE 1: Stage-2 data-coverage health panel (invisible starvation made visible) */
+.sc-coverage { margin: 10px 0 4px; }
+.cov-head { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.cov-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; }
+.cov-cell { border: 1px solid var(--border); border-radius: 9px; padding: 8px 11px;
+  display: flex; flex-direction: column; gap: 2px; }
+.cov-cell .cov-name { font-weight: 700; font-size: 12px; text-transform: capitalize; }
+.cov-cell .cov-pct { font-size: 19px; font-weight: 800; line-height: 1.1; }
+.cov-cell .cov-detail { font-size: 11px; color: var(--muted); }
+.cov-cell.cov-good { border-color: rgba(56,161,105,.5); } .cov-good .cov-pct { color: var(--green,#38a169); }
+.cov-cell.cov-warn { border-color: rgba(214,158,46,.5); } .cov-warn .cov-pct { color: var(--amber,#d69e2e); }
+.cov-cell.cov-bad  { border-color: rgba(229,62,62,.6); background: rgba(229,62,62,.07); }
+.cov-bad .cov-pct { color: var(--red,#e53e3e); }
+.cov-rl { color: var(--amber,#d69e2e); }
 .sc-hm-note { background: rgba(183,121,31,.12); border: 1px solid #b7791f; color: #e8c07d;
   border-radius: 10px; padding: 10px 14px; font-size: 13px; margin-bottom: 12px; }
 .sc-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }

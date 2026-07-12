@@ -363,6 +363,7 @@ def eval_lane(lane: str, row: dict[str, Any], scores: dict[str, float],
         "float_tier": row.get("float_tier"), "float_shares": row.get("float_shares"),
         "float_est": row.get("float_est"), "so_proxy": row.get("so_proxy"),
         "rel_vol": row.get("rel_vol"), "sector_name": row.get("sector_name"),
+        "days_to_earnings": sig.get("days_to_earnings"),   # B3 earnings guard input
         "dilution_risk": row.get("dilution_risk"), "coiled_state": state,
         "demand_signals": gate_tags if lane == "reversal" else [],
         "catalyst": sig.get("catalyst"), "chips": chips,
@@ -401,6 +402,26 @@ def lane_disable_status(coverage: dict[str, float],
                 "degraded": {f: round(c, 3) for f, c in degraded.items()},
             }
     return out
+
+
+def stage1_prescore(row: dict[str, Any]) -> float:
+    """GATE 1 shortlist ranker: the best available-only lane composite from what
+    STAGE 1 can already see (chart + fundamental families). Deliberately PERMISSIVE
+    -- no gate, no coverage floor, no require_available, no disable filter -- because
+    its only job is to decide which names deserve the expensive Stage-2 fetch. It
+    scores the fundamental-thesis lanes on their Stage-1-visible strength (their
+    fundamental weight) so a strong-fundamental, quiet-chart name still ranks high
+    enough to earn its insider/catalyst data -- otherwise the shortlist would
+    silently recreate the blindness one layer up."""
+    scores, avail = compute_families(row)
+    best = 0.0
+    for lane in LANES:
+        w = _WEIGHTS[lane]
+        num = sum(w[f] * scores[f] for f in EDGE_FAMILIES if avail[f] and w[f] > 0)
+        den = sum(w[f] for f in EDGE_FAMILIES if avail[f] and w[f] > 0)
+        if den > 0:
+            best = max(best, 10.0 * num / den)
+    return round(best, 3)
 
 
 def evaluate_all(row: dict[str, Any], *, sector_early: bool = False,

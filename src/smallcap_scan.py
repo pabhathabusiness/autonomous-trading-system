@@ -42,6 +42,7 @@ def _algo_candidate(trigger: dict[str, Any], avg_dollar_vol: Optional[float]) ->
         "composite_score": trigger.get("composite_score"), "lane_score": trigger.get("score"),
         "price_tier": trigger.get("price_tier"), "hold_band": trigger.get("band"),
         "rel_vol": trigger.get("rel_vol"), "strategy": "smallcap",
+        "days_to_earnings": trigger.get("days_to_earnings"),   # B3 earnings guard
     }
 
 
@@ -62,11 +63,15 @@ def scan_and_open(db: Database, fh: Optional[FinnhubClient] = None,
     wall enforced inside submit_bracket_order). auto_place OFF -> sim only."""
     rows = db.get_smallcap_universe()
 
-    # GATE 2: measure per-family data coverage, then DISABLE any lane whose
-    # thesis-core family is degraded (e.g. insider at 0% -> turnaround +
-    # hidden_value off). A disabled lane never fires, so it can never mislabel a
-    # setup into the track record. lane_status is cached for the page.
-    coverage = L.family_coverage(rows)
+    # GATE 2 x GATE 1: measure per-family coverage over the SHORTLIST (the Stage-2-
+    # enriched names -- the only ones the fundamental-thesis lanes can fire on),
+    # then DISABLE any lane whose thesis-core family is degraded. Measuring on the
+    # shortlist (not the whole 1068) is what lets the lanes RE-ENABLE once Stage 2
+    # lifts insider/catalyst >90% there. Falls back to all rows before the first
+    # Stage-2 build exists. A disabled lane never fires -> never mislabels a setup.
+    stage2_rows = [r for r in rows if ((r.get("signals") or {}).get("stage2_enriched"))]
+    cov_rows = stage2_rows or rows
+    coverage = L.family_coverage(cov_rows)
     disabled_status = L.lane_disable_status(coverage)
     disabled = frozenset(disabled_status)
 

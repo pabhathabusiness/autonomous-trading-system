@@ -49,7 +49,18 @@ class FinnhubClient:
         self.enabled = bool(self._key)
         self._last_call = 0.0
         self._session = requests.Session()
+        # GATE 1: per-endpoint call outcomes so a coverage report can tell a
+        # RATE-LIMIT (429) apart from a genuine error or an empty result. Keyed by
+        # endpoint path -> {"ok", "rate_limited", "error"}.
+        self.call_stats: dict[str, dict[str, int]] = {}
         logger.info("Finnhub %s", "ENABLED" if self.enabled else "disabled (no FINNHUB_KEY in .env)")
+
+    def _stat(self, path: str, outcome: str) -> None:
+        d = self.call_stats.setdefault(path, {"ok": 0, "rate_limited": 0, "error": 0})
+        d[outcome] = d.get(outcome, 0) + 1
+
+    def reset_call_stats(self) -> None:
+        self.call_stats = {}
 
     def _get(self, path: str, params: dict[str, Any]) -> Optional[Any]:
         if not self.enabled:
@@ -62,13 +73,17 @@ class FinnhubClient:
             r = self._session.get(f"{_BASE}{path}", params={**params, "token": self._key}, timeout=10)
             if r.status_code == 429:
                 logger.warning("Finnhub 429 (rate limit) on %s -- backing off this cycle", path)
+                self._stat(path, "rate_limited")
                 return None
             if r.status_code != 200:
                 logger.debug("Finnhub %s -> %s", path, r.status_code)
+                self._stat(path, "error")
                 return None
+            self._stat(path, "ok")
             return r.json()
         except requests.RequestException as exc:
             logger.debug("Finnhub request failed: %s", exc)
+            self._stat(path, "error")
             return None
 
     # ---- endpoints used (addendum table) ----
@@ -85,6 +100,18 @@ class FinnhubClient:
         frm = date.today()
         return self._get("/calendar/earnings", {"from": frm.isoformat(),
                                                 "to": (frm + timedelta(days=days_ahead)).isoformat()})
+
+    def earnings_for_symbol(self, symbol: str, days_ahead: int = 45,
+                            days_back: int = 5) -> Optional[dict[str, Any]]:
+        """Per-symbol earnings calendar over a window around today. Returns the
+        raw Finnhub payload ({'earningsCalendar': [...]}) or None on fetch failure
+        -- so a rate-limit is distinguishable from a genuinely-empty calendar (GATE
+        1 / B3 earnings guard). Fetch failure => days-to-earnings UNKNOWN => the
+        risk gate fails closed."""
+        frm = date.today() - timedelta(days=days_back)
+        return self._get("/calendar/earnings",
+                         {"symbol": symbol.upper(), "from": frm.isoformat(),
+                          "to": (date.today() + timedelta(days=days_ahead)).isoformat()})
 
     # ---- Addendum 2 small-cap endpoints (free-tier verified 2026-07-12) ----
     def profile2(self, symbol: str) -> Optional[dict[str, Any]]:

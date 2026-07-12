@@ -41,7 +41,7 @@ def base_ctx(**over):
     d = dict(account_type="algo", symbol="TEST", equity=100000.0, entry=3.0, stop=2.7,
              target=3.6, shares=3333, sector="Technology", lane="turnaround",
              config=make_config(), open_risk=0.0, sector_counts={}, lane_notional={},
-             halted=False, avg_dollar_vol=5_000_000.0, rel_vol=2.0)
+             halted=False, avg_dollar_vol=5_000_000.0, rel_vol=2.0, days_to_earnings=10)
     d.update(over)
     return RiskContext(**d)
 
@@ -126,6 +126,17 @@ def test_gate_liquidity():
 def test_gate_halted():
     d = risk_gate.evaluate(base_ctx(halted=True))
     assert not d.checks["not_halted"] and not d.approved
+
+
+def test_gate_earnings_proximity():
+    # unknown earnings date -> FAIL CLOSED
+    assert not risk_gate.evaluate(base_ctx(days_to_earnings=None)).checks["earnings_proximity"]
+    # inside the 2-day blackout -> fail
+    assert not risk_gate.evaluate(base_ctx(days_to_earnings=1)).checks["earnings_proximity"]
+    assert not risk_gate.evaluate(base_ctx(days_to_earnings=2)).checks["earnings_proximity"]
+    # clear of earnings -> pass
+    assert risk_gate.evaluate(base_ctx(days_to_earnings=3)).checks["earnings_proximity"]
+    assert not risk_gate.evaluate(base_ctx(days_to_earnings=None)).approved
 
 
 # ------------------------------------------------------------- chokepoint / bypass
@@ -305,7 +316,8 @@ def test_gap_through_stop():
 # --------------------------------------------------------------- order executor
 def _candidate(symbol="AAA", sector="Technology", lane="turnaround"):
     return {"symbol": symbol, "entry": 3.0, "stop": 2.7, "target": 3.6, "sector": sector,
-            "lane": lane, "quality": 8.0, "avg_dollar_vol": 5_000_000.0, "direction": "long"}
+            "lane": lane, "quality": 8.0, "avg_dollar_vol": 5_000_000.0, "direction": "long",
+            "days_to_earnings": 10}
 
 
 def test_executor_halted_refuses_batch():

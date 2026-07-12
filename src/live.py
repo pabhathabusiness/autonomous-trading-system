@@ -72,17 +72,32 @@ def build_live_snapshot(db, alpaca) -> dict[str, Any]:
         name_pct = session_pct(t["symbol"])
         rs = round(name_pct - spy_pct, 2) if (name_pct is not None and spy_pct is not None) else None
 
+        # dollar accounting (needs shares; legacy rows have none -> None)
+        shares = t.get("shares")
+        position_value = round(shares * lp, 2) if (shares and lp) else None
+        live_pnl_usd = None
+        if shares and lp and entry:
+            live_pnl_usd = round(shares * ((entry - lp) if is_short else (lp - entry)), 2)
+        days_held = None
+        try:
+            days_held = (datetime.now(timezone.utc) - datetime.fromisoformat(t["entry_date"])).days
+        except (ValueError, TypeError):
+            pass
+
         trades.append({
             "id": t["id"], "symbol": t["symbol"], "sector_name": t["sector_name"],
             "strategy": t["strategy"], "direction": t.get("direction", "long"),
             "confidence": t["confidence"],
             # frozen plan (locked at entry -- the discipline anchor)
             "entry_price": entry, "stop_loss": stop, "target_price": tgt,
-            "entry_date": t["entry_date"],
+            "entry_date": t["entry_date"], "days_held": days_held,
+            "shares": shares,
             # live mark
             "live_price": lp,
             "age_seconds": info.get("age_seconds"),
             "live_pnl_pct": live_pnl,
+            "live_pnl_usd": live_pnl_usd,
+            "position_value": position_value,
             "dist_to_stop_pct": round((lp - stop) / lp * 100, 2) if lp else None,
             "dist_to_target_pct": round((tgt - lp) / lp * 100, 2) if lp else None,
             # relative strength (side-by-side, not blended)

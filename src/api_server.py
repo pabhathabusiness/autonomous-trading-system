@@ -26,7 +26,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from src import bias_strip as bias_strip_module
+from src import drilldown as drilldown_module
 from src import live as live_module
+from src import market_overview as market_overview_module
 from src import paper_trader
 from src.scheduler import AutonomousScheduler
 from src.alpaca_client import AlpacaClient
@@ -729,6 +731,21 @@ def _stop_scheduler() -> None:
 @app.get("/api/scheduler")
 def scheduler_status() -> dict[str, Any]:
     return SCHEDULER.status()
+
+
+@app.get("/api/drilldown/{symbol}")
+def get_drilldown(symbol: str) -> dict[str, Any]:
+    """Timeframe-by-timeframe (15m/30m/1h/4h/daily) bias + a trade plan only when
+    the compression + MACD-cross + pivot confluence is genuinely there."""
+    return drilldown_module.build(ALPACA, symbol.upper())
+
+
+@app.get("/api/market-overview")
+def get_market_overview() -> dict[str, Any]:
+    """Expanded Market Regime panel: indices (SPY/QQQ/IWM), VIX, breadth proxy,
+    economic calendar (static), earnings for held names, and market news."""
+    held = sorted({t["symbol"] for t in DB.get_paper_trades(status="open")})
+    return market_overview_module.build(ALPACA, DB.get_latest_sector_rankings(), CONFIG, held)
 
 
 @app.get("/api/bias-strip")

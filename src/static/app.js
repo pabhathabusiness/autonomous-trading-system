@@ -382,52 +382,96 @@ function ageLabel(sec) {
   return `<span class="age ${cls}" title="bar age">${txt}</span>`;
 }
 
-// Live paper-trade book: marks every open sim trade to Alpaca's real-time
-// feed (live price, live P&L, RS-vs-SPY). Polled every ~5s; no page refresh.
+// Live paper-trade book: marks every open sim trade to Alpaca's real-time feed.
+// Sortable by any column (click header); the row order is CAPTURED on click and
+// held stable across the 5s auto-refresh, so rows never reshuffle under you --
+// only the values update in place. New positions append at the bottom.
+let lastLiveData = { trades: [] };
+let liveSort = { col: "live_pnl_pct", dir: -1 };
+let liveOrder = null;  // symbols in display order (null until first render)
+
+const LIVE_COLS = [
+  { k: "symbol", label: "Symbol", txt: true },
+  { k: "entry_price", label: "Entry" },
+  { k: "live_price", label: "Current" },
+  { k: "position_value", label: "Pos. value" },
+  { k: "live_pnl_usd", label: "P&L $" },
+  { k: "live_pnl_pct", label: "P&L %" },
+  { k: "rs_vs_spy", label: "RS vs SPY" },
+  { k: "dist_to_stop_pct", label: "→ Stop" },
+  { k: "dist_to_target_pct", label: "→ Target" },
+  { k: "days_held", label: "Days" },
+];
+
+function sortSymbols(trades, sort) {
+  return [...trades].sort((a, b) => {
+    const va = a[sort.col], vb = b[sort.col];
+    const na = va == null, nb = vb == null;
+    if (na && nb) return 0; if (na) return 1; if (nb) return -1;  // nulls always last
+    if (typeof va === "string") return va.localeCompare(vb) * sort.dir;
+    return (va - vb) * sort.dir;
+  }).map(t => t.symbol);
+}
+
+function sortLive(col) {
+  if (liveSort.col === col) liveSort.dir = -liveSort.dir;
+  else liveSort = { col, dir: col === "symbol" ? 1 : -1 };
+  liveOrder = sortSymbols(lastLiveData.trades || [], liveSort);  // re-capture order on click
+  renderLiveBook(lastLiveData);
+}
+
+function liveCell(t, k) {
+  const v = t[k];
+  if (v == null) return '<span class="muted">—</span>';
+  if (k === "symbol") return `<strong>${v}</strong>${t.direction === "short" ? ' <span class="short-tag">▼</span>' : ""}`;
+  if (k === "entry_price" || k === "live_price") return price(v) + (k === "live_price" ? " " + ageLabel(t.age_seconds) : "");
+  if (k === "position_value") return money(v, 0);
+  if (k === "live_pnl_usd") return `<span class="${v >= 0 ? "pos" : "neg"}">${money(v)}</span>`;
+  if (k === "days_held") return v;
+  // percentage columns, colored by sign
+  const cls = (k === "dist_to_stop_pct" || k === "dist_to_target_pct") ? "" : (v >= 0 ? "pos" : "neg");
+  return `<span class="${cls}">${pct(v, k === "live_pnl_pct" ? 2 : 1)}</span>`;
+}
+
+function renderLiveBook(d) {
+  const el = $("paper-open-content"); if (!el) return;
+  const trades = d.trades || [];
+  if (!trades.length) {
+    el.innerHTML = '<p class="muted">No open trades yet — the engine opens them automatically as setups qualify.</p>';
+    liveOrder = null; return;
+  }
+  const bySym = {}; trades.forEach(t => bySym[t.symbol] = t);
+  // capture initial order once; thereafter keep it stable (drop gone, append new)
+  if (liveOrder === null) liveOrder = sortSymbols(trades, liveSort);
+  const known = new Set(liveOrder);
+  liveOrder = liveOrder.filter(s => bySym[s]).concat(trades.map(t => t.symbol).filter(s => !known.has(s)));
+  const ordered = liveOrder.map(s => bySym[s]).filter(Boolean);
+
+  const maxAge = Math.max(...trades.map(t => t.age_seconds ?? 0));
+  const feed = d.alpaca_enabled
+    ? `<span class="age ${maxAge < 90 ? "age-live" : "age-stale"}">${maxAge < 90 ? "🟢 LIVE" : "⚠ stale"}</span> Alpaca IEX`
+    : '<span class="muted">Alpaca off — showing plan only</span>';
+  const spy = d.spy || {};
+  const arrow = (k) => liveSort.col === k ? (liveSort.dir < 0 ? " ▼" : " ▲") : "";
+  const head = LIVE_COLS.map(c =>
+    `<th class="sortable ${liveSort.col === c.k ? "sorted" : ""}" onclick="sortLive('${c.k}')">${c.label}${arrow(c.k)}</th>`).join("");
+
+  el.innerHTML =
+    `<p class="muted">${d.open_count} open · ${d.priced_count} priced live · ${feed}
+      · SPY ${price(spy.price)} ${spy.session_pct != null ? "(" + pct(spy.session_pct, 1) + " session)" : ""}
+      <span class="muted">as of ${new Date(d.as_of).toLocaleTimeString()}</span></p>
+     <table class="livebook"><thead><tr>${head}</tr></thead><tbody>` +
+    ordered.map(t => `<tr>${LIVE_COLS.map(c => `<td>${liveCell(t, c.k)}</td>`).join("")}</tr>`).join("") +
+    "</tbody></table>";
+}
+
 async function loadLive() {
-  const el = $("paper-open-content");
   try {
     const d = await fetchJSON("/api/live");
-    const trades = d.trades || [];
-    if (!trades.length) {
-      el.innerHTML = '<p class="muted">No open trades yet — the engine opens them automatically as setups qualify.</p>';
-      return;
-    }
-    const maxAge = Math.max(...trades.map(t => t.age_seconds ?? 0));
-    const feed = d.alpaca_enabled
-      ? `<span class="age ${maxAge < 90 ? "age-live" : "age-stale"}">${maxAge < 90 ? "🟢 LIVE" : "⚠ stale " + ageLabel(maxAge).replace(/<[^>]+>/g, "")}</span> Alpaca IEX`
-      : '<span class="muted">Alpaca off — showing plan only</span>';
-    const spy = d.spy || {};
-    const bySector = {};
-    for (const t of trades) (bySector[t.sector_name || "Unclassified"] ||= []).push(t);
-    const sectors = Object.keys(bySector).sort();
-
-    el.innerHTML =
-      `<p class="muted">${d.open_count} open · ${d.priced_count} priced live · ${feed}
-        · SPY ${price(spy.price)} ${spy.session_pct != null ? "(" + pct(spy.session_pct, 1) + " session)" : ""}
-        <span class="muted">as of ${new Date(d.as_of).toLocaleTimeString()}</span></p>` +
-      sectors.map(s => {
-        const rows = bySector[s];
-        return `<h4>${s} <span class="muted">(${rows.length})</span></h4>
-          <table><thead><tr>
-            <th>Symbol</th><th>Strategy</th><th>Given</th>
-            <th>Plan (entry→stop/target)</th><th>Live</th><th>Live P&L</th><th>vs SPY</th>
-          </tr></thead><tbody>` +
-          rows.map(t => {
-            const shortTag = t.direction === "short" ? ' <span class="short-tag">▼</span>' : "";
-            return `<tr>
-              <td><strong>${t.symbol}</strong>${shortTag}</td>
-              <td>${t.strategy}</td>
-              <td class="muted">${(t.entry_date || "").slice(0, 10)}</td>
-              <td class="muted">${price(t.entry_price)} → ${price(t.stop_loss)} / ${price(t.target_price)}</td>
-              <td>${price(t.live_price)} ${ageLabel(t.age_seconds)}</td>
-              <td class="${(t.live_pnl_pct ?? 0) >= 0 ? "pos" : "neg"}">${pct(t.live_pnl_pct, 2)}</td>
-              <td class="${(t.rs_vs_spy ?? 0) >= 0 ? "pos" : "neg"}">${t.rs_vs_spy != null ? pct(t.rs_vs_spy, 1) : "-"}</td>
-            </tr>`;
-          }).join("") + `</tbody></table>`;
-      }).join("");
+    lastLiveData = d;
+    renderLiveBook(d);
   } catch (e) {
-    el.innerHTML = `<p class="muted">${e.message}</p>`;
+    const el = $("paper-open-content"); if (el) el.innerHTML = `<p class="muted">${e.message}</p>`;
   }
 }
 
@@ -528,6 +572,8 @@ const bandLabel = (b) => ({ "1-2 day": "1–2 Day", "1-2 week swing": "Swing", "
 let biasData = {};       // symbol -> bias-strip entry
 let liveIndex = {};      // symbol -> /api/live trade
 let algoIndex = {};      // trade id -> /api/log/algo trade
+let lastAlgoData = { trades: [] };  // last /api/log/algo payload (for re-filtering)
+let trackFilter = "all"; // Track Record filter: all | open | closed
 
 async function refreshLiveIndex() {
   try {
@@ -574,6 +620,48 @@ async function loadSectorBoard() {
     $("board-watch").innerHTML = watch.length ? watch.map(s => row(s, 'nu')).join("")
       : '<p class="muted">none turning right now</p>';
   } catch (e) { $("board-strong").innerHTML = `<p class="muted">${e.message}</p>`; }
+}
+
+// #7 Market Context: indices (SPY/QQQ/IWM) + VIX + breadth + calendar + news.
+async function loadMarketOverview() {
+  const tiles = $("market-tiles"); if (!tiles) return;
+  try {
+    const d = await fetchJSON("/api/market-overview");
+    const asof = $("mkt-asof");
+    if (asof) asof.textContent = d.as_of ? "as of " + new Date(d.as_of).toLocaleTimeString() : "";
+    // indices are click-through like the bias cards -> fold into biasData
+    (d.indices || []).forEach(m => biasData[m.symbol] = m);
+    const idx = (d.indices || []).map(m => `
+      <div class="mtile" onclick="openBias('${m.symbol}')">
+        <div class="mt-tk">${m.symbol}</div>
+        <div class="mt-val">${price(m.price)}</div>
+        <div class="mt-sub ${(m.session_pct ?? 0) >= 0 ? 'pos' : 'neg'}">${m.session_pct != null ? pct(m.session_pct, 2) : '—'}</div>
+      </div>`).join("");
+    const vix = d.vix ? `<div class="mtile">
+        <div class="mt-tk">VIX</div><div class="mt-val">${num(d.vix.level, 2)}</div>
+        <div class="mt-sub ${d.vix.change <= 0 ? 'pos' : 'neg'}">${signed(d.vix.change, 2)} · ${d.vix.state}</div></div>` : '';
+    const br = d.breadth ? `<div class="mtile">
+        <div class="mt-tk">Breadth</div><div class="mt-val">${d.breadth.pct_up}% up</div>
+        <div class="mt-sub muted">${d.breadth.advancers}▲ / ${d.breadth.decliners}▼ sectors</div></div>` : '';
+    tiles.innerHTML = idx + vix + br || '<p class="muted">no data</p>';
+
+    // "what's coming": economic events + held-name earnings, merged by date
+    const cal = [
+      ...(d.economic || []).map(e => ({ date: e.date, label: e.event, kind: 'econ' })),
+      ...(d.earnings || []).map(e => ({ date: e.date, label: e.symbol + ' earnings', kind: 'earn' })),
+    ].sort((a, b) => a.date.localeCompare(b.date)).slice(0, 8);
+    const calEl = $("mkt-calendar");
+    if (calEl) calEl.innerHTML = cal.length ? cal.map(e =>
+      `<div class="cal-row"><span class="cal-date">${e.date.slice(5)}</span>
+        <span class="cal-label ${e.kind === 'earn' ? 'cal-earn' : ''}">${e.label}</span></div>`).join("")
+      : '<p class="muted">nothing scheduled</p>';
+
+    const newsEl = $("mkt-news");
+    if (newsEl) newsEl.innerHTML = (d.news || []).length ? (d.news || []).slice(0, 6).map(n =>
+      `<div class="news-row">${n.url ? `<a href="${n.url}" target="_blank" rel="noopener noreferrer">${n.title}</a>` : n.title}
+        ${n.provider ? `<span class="muted"> · ${n.provider}</span>` : ''}</div>`).join("")
+      : '<p class="muted">no headlines</p>';
+  } catch (e) { tiles.innerHTML = `<p class="muted">${e.message}</p>`; }
 }
 
 function setupChip(t) {
@@ -641,22 +729,37 @@ function renderTrackRecord(d) {
       ${['A', 'B', 'C', 'D', 'F', 'UG'].map(g => `<span class="gpill ${g === 'UG' ? 'g-U' : 'g-' + g}">${g} ${dist[g]}</span>`).join("")}
     </div><div class="lbl">process grades</div></div>`;
 
+  const nOpen = trades.filter(t => t.status === 'open').length;
+  const nClosed = trades.filter(t => t.status === 'closed').length;
   if (sm) sm.textContent = `${graded.length} graded · ${d.ungraded} ungraded` +
     (legacyN ? ` · ${legacyN} legacy (pre-grading, excluded from stats)` : '') + ' — autofills after each trade';
-  if (!trades.length) { el.innerHTML = '<p class="muted">No algo trades yet — rows appear here automatically as the engine takes trades.</p>'; return; }
 
-  el.innerHTML = `<table class="track"><thead><tr>
+  // filter: all / open / closed
+  const rows = trackFilter === 'all' ? trades : trades.filter(t => t.status === trackFilter);
+  const fbtn = (label, key, n) =>
+    `<button class="chip ${trackFilter === key ? 'on' : ''}" onclick="setTrackFilter('${key}')">${label} <span class="muted">${n}</span></button>`;
+  const filterbar = `<div class="filterbar">
+    ${fbtn('All', 'all', trades.length)}${fbtn('Open', 'open', nOpen)}${fbtn('Closed', 'closed', nClosed)}</div>`;
+
+  if (!trades.length) { el.innerHTML = filterbar + '<p class="muted">No algo trades yet — rows appear here automatically as the engine takes trades.</p>'; return; }
+
+  el.innerHTML = filterbar + `<table class="track"><thead><tr>
       <th>Date</th><th>Symbol</th><th>Setup</th><th>Band</th><th>Entry → Stop / Target</th>
-      <th>R:R</th><th>Grade</th><th>Feedback</th><th>Outcome</th><th class="pnlcol">R / P&L</th></tr></thead><tbody>` +
-    trades.map(t => {
+      <th>R:R</th><th>Grade</th><th>Feedback</th><th>Outcome</th>
+      <th class="pnlcol">R</th><th class="pnlcol">Return</th><th class="pnlcol">P&amp;L</th></tr></thead><tbody>` +
+    rows.map(t => {
       const live = liveIndex[t.symbol], isOpen = t.status === 'open';
-      const outcome = isOpen
-        ? (live ? `<span class="tagopen">open</span> <span class="${(live.live_pnl_pct ?? 0) >= 0 ? 'pos' : 'neg'}">${pct(live.live_pnl_pct, 1)}</span> ${ageLabel(live.age_seconds)}`
-          : '<span class="tagopen">open</span>')
-        : `<span class="${t.outcome === 'win' ? 'pos' : 'neg'}">${(t.outcome || '').toUpperCase()}</span>`;
-      const rpnl = isOpen ? '<span class="muted">—</span>'
-        : `<span class="${(t.r_multiple ?? 0) >= 0 ? 'pos' : 'neg'}">${t.r_multiple != null ? signed(t.r_multiple, 2) + 'R' : '—'}</span>
-           <span class="muted">${t.pnl_usd != null ? money(t.pnl_usd) : ''}</span>`;
+      // Outcome = Win/Loss for closed; a live tag for open
+      const outcome = isOpen ? '<span class="tagopen">open</span>'
+        : `<span class="${t.outcome === 'win' ? 'pos' : 'neg'}">${t.outcome === 'win' ? 'Win' : 'Loss'}</span>`;
+      // Return %: closed uses realized return_pct; open shows the live P&L %
+      const retPct = isOpen
+        ? (live && live.live_pnl_pct != null ? `<span class="${live.live_pnl_pct >= 0 ? 'pos' : 'neg'}">${pct(live.live_pnl_pct, 1)}</span> ${ageLabel(live.age_seconds)}` : '<span class="muted">—</span>')
+        : (t.return_pct != null ? `<span class="${t.return_pct >= 0 ? 'pos' : 'neg'}">${pct(t.return_pct, 1)}</span>` : '<span class="muted">—</span>');
+      const rCell = isOpen || t.r_multiple == null ? '<span class="muted">—</span>'
+        : `<span class="${t.r_multiple >= 0 ? 'pos' : 'neg'}">${signed(t.r_multiple, 2)}R</span>`;
+      const pnlCell = isOpen || t.pnl_usd == null ? '<span class="muted">—</span>'
+        : `<span class="${t.pnl_usd >= 0 ? 'pos' : 'neg'}">${money(t.pnl_usd)}</span>`;
       return `<tr class="jrow" onclick="openTrade(${t.id})">
         <td class="muted nowrap">${(t.entry_date || '').slice(0, 10)}</td>
         <td><strong>${t.symbol}</strong>${t.direction === 'short' ? ' <span class="short-tag">▼</span>' : ''}</td>
@@ -667,10 +770,14 @@ function renderTrackRecord(d) {
         <td>${gradeBadge(t, true)}</td>
         <td class="feedback muted">${t.legacy ? '<span class="muted">— pre-grading —</span>' : (t.process_notes || '—')}</td>
         <td>${outcome}</td>
-        <td class="pnlcol">${rpnl}</td>
+        <td class="pnlcol">${rCell}</td>
+        <td class="pnlcol">${retPct}</td>
+        <td class="pnlcol">${pnlCell}</td>
       </tr>`;
     }).join("") + "</tbody></table>";
 }
+
+function setTrackFilter(f) { trackFilter = f; renderTrackRecord(lastAlgoData); }
 
 async function loadAlgo() {
   try {
@@ -678,6 +785,7 @@ async function loadAlgo() {
     const d = await fetchJSON("/api/log/algo");
     algoIndex = {};
     (d.trades || []).forEach(t => algoIndex[t.id] = t);
+    lastAlgoData = d;
     renderIdeasFeed(d);
     renderTrackRecord(d);
   } catch (e) {
@@ -701,8 +809,47 @@ function openBias(sym) {
       <div class="cell"><div class="l">Key level above ▲</div><div class="v">${m.level_above != null ? num(m.level_above, 2) : '—'}</div></div>
       <div class="cell"><div class="l">Key level below ▼</div><div class="v">${m.level_below != null ? num(m.level_below, 2) : '—'}</div></div>
     </div>
-    <p class="muted" style="margin-top:14px">Conditional, not a forecast: constructive while it holds the lower level, cautious if it loses it.</p>`;
+    <p class="muted" style="margin-top:12px">Conditional, not a forecast: constructive while it holds the lower level, cautious if it loses it.</p>
+    <div class="d-block"><h4>Timeframe breakdown</h4>
+      <div id="drill-body" class="muted">Reading 15m / 30m / 1h / 4h / daily…</div></div>`;
   showSheet();
+  loadDrilldown(sym);
+}
+
+// #8 MAG-7 drill-down: bias per timeframe + a trade plan only when the real
+// (compression + MACD-cross + pivot) confluence is there.
+const MTF_ORDER = ["15m", "30m", "1h", "4h", "daily"];
+async function loadDrilldown(sym) {
+  const el = $("drill-body"); if (!el) return;
+  try {
+    const d = await fetchJSON(`/api/drilldown/${encodeURIComponent(sym)}`);
+    const tfs = d.timeframes || {};
+    const rows = MTF_ORDER.filter(tf => tfs[tf]).map(tf => {
+      const r = tfs[tf];
+      const cls = r.bias === 'Bullish' ? 'pos' : r.bias === 'Bearish' ? 'neg' : 'muted';
+      const tags = (r.squeeze ? '<span class="mtf-tag">squeeze</span>' : '') +
+        (r.macd_cross ? `<span class="mtf-tag">MACD ${r.macd_dir}-cross</span>` : `<span class="muted">MACD ${(r.macd || '').toLowerCase()}</span>`);
+      return `<div class="mtf-row"><span class="mtf-tf">${tf}</span>
+        <span class="mtf-bias ${cls}">${r.bias}</span><span class="mtf-tags">${tags}</span></div>`;
+    }).join("");
+    let plan;
+    if (d.plan) {
+      const p = d.plan;
+      plan = `<div class="drill-plan ${p.direction === 'long' ? 'plan-long' : 'plan-short'}">
+        <div class="dp-head">Trade plan · <strong>${p.direction.toUpperCase()}</strong> <span class="muted">(${p.trigger_tf} trigger)</span></div>
+        <div class="plan3" style="margin-top:8px">
+          <div class="p p-e"><div class="l">Entry</div><div class="v">${price(p.entry)}</div></div>
+          <div class="p p-s"><div class="l">Stop</div><div class="v">${price(p.stop)}</div></div>
+          <div class="p p-t"><div class="l">Target</div><div class="v">${price(p.target)}</div></div>
+        </div>
+        <div class="muted" style="margin-top:8px">R:R ${num(p.risk_reward, 1)}:1 · ${p.note}</div></div>`;
+    } else {
+      plan = '<p class="muted" style="margin-top:10px">No trade plan — the compression + MACD-cross + pivot confluence isn\'t there right now. Bias only (no manufactured trade).</p>';
+    }
+    el.classList.remove("muted");
+    el.innerHTML = `<div class="mtf">${rows || '<p class="muted">no timeframe data</p>'}</div>${plan}` +
+      (d.alpaca_enabled ? '' : '<p class="muted" style="margin-top:8px">Alpaca off — intraday timeframes may be limited.</p>');
+  } catch (e) { el.innerHTML = `<p class="muted">${e.message}</p>`; }
 }
 
 function openTrade(id) {
@@ -746,7 +893,7 @@ function currentView() {
 function switchView(v) {
   document.querySelectorAll(".navtab").forEach(t => t.classList.toggle("active", t.dataset.view === v));
   document.querySelectorAll(".view").forEach(s => s.classList.toggle("active", s.id === "view-" + v));
-  if (v === "dashboard") { loadBiasStrip(); loadSectorBoard(); loadAlgo(); }
+  if (v === "dashboard") { loadMarketOverview(); loadBiasStrip(); loadSectorBoard(); loadAlgo(); }
   else if (v === "track") { loadAlgo(); }
   else if (v === "sectors") { loadSectors(); }
   else if (v === "more") { loadAll(); }
@@ -767,6 +914,7 @@ document.querySelectorAll(".tab").forEach(tab => {
 
 // initial paint: dashboard (default view) + engine status, and the detailed
 // "More" panels in the background so switching to them is instant.
+loadMarketOverview();
 loadBiasStrip();
 loadSectorBoard();
 loadAlgo();
@@ -781,5 +929,6 @@ setInterval(() => {
   else if (v === "track") { loadAlgo(); }
 }, 6000);
 setInterval(loadEngineStatus, 15000);
+setInterval(() => { if (currentView() === "dashboard") { loadMarketOverview(); } }, 60000);
 setInterval(() => { if (currentView() === "more") { loadLive(); } }, 5000);
 setInterval(() => { if (currentView() === "more") { loadAll(); } }, 30000);

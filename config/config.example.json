@@ -51,6 +51,15 @@
   "dashboard": {
     "bias_strip": ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA"]
   },
+  "market_calendar": {
+    "_note": "Static forward schedule for the Market Regime panel (macro dates are set in advance). If omitted, a built-in default is used. Edit to refine.",
+    "economic": [
+      {"date": "2026-07-29", "event": "FOMC rate decision", "importance": "high"},
+      {"date": "2026-08-07", "event": "Jobs report (July)", "importance": "high"},
+      {"date": "2026-08-12", "event": "CPI (July)", "importance": "high"},
+      {"date": "2026-09-16", "event": "FOMC rate decision", "importance": "high"}
+    ]
+  },
   "market_regime": {
     "symbol": "SPY",
     "overbought_rsi": 70,

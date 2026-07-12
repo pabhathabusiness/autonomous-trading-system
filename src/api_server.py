@@ -820,7 +820,8 @@ def get_market_overview() -> dict[str, Any]:
     """Expanded Market Regime panel: indices (SPY/QQQ/IWM), VIX, breadth proxy,
     economic calendar (static), earnings for held names, and market news."""
     held = sorted({t["symbol"] for t in DB.get_paper_trades(status="open")})
-    return market_overview_module.build(ALPACA, DB.get_latest_sector_rankings(), CONFIG, held)
+    return market_overview_module.build(ALPACA, DB.get_latest_sector_rankings(), CONFIG, held,
+                                        db=DB, finnhub_enabled=FINNHUB.enabled)
 
 
 @app.get("/api/bias-strip")

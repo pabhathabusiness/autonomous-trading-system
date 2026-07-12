@@ -84,53 +84,76 @@ def _economic(config) -> list[dict[str, Any]]:
                   key=lambda e: e["date"])[:6]
 
 
-def _earnings(symbols: list[str]) -> list[dict[str, Any]]:
-    if not symbols:
-        return []
-
-    def f():
-        out = []
-        for sym in sorted(set(symbols))[:15]:
-            try:
-                cal = yf.Ticker(sym).calendar or {}
-            except Exception:
-                continue
-            dates = cal.get("Earnings Date") or []
-            if dates:
-                d = min(dates)
-                out.append({"symbol": sym,
-                            "date": d.isoformat() if hasattr(d, "isoformat") else str(d)})
-        out.sort(key=lambda e: e["date"])
-        return out
-    return _cached("earn:" + ",".join(sorted(set(symbols))), 6 * 3600, f) or []
+# Market news + earnings are sourced from the FINNHUB cache the rate-limited
+# refresher populates (news_refresher.tick). We only READ the cache here -- never
+# a synchronous Finnhub call in the request path -- so a Finnhub outage or rate
+# limit can never slow or break a page load. The panels stay usable while the
+# cache is reasonably fresh, then flip to "unavailable" (below the hard limit we
+# still show last-good data through a transient hiccup; past it we stop pretending).
+_NEWS_HARD_LIMIT = 60 * 60        # market news: show cached up to 60 min, then unavailable
+_EARN_HARD_LIMIT = 36 * 3600      # earnings calendar: refreshed daily, tolerate 36h
 
 
-def _news() -> list[dict[str, Any]]:
-    def f():
-        items = yf.Ticker("SPY").news or []
-        out = []
-        for it in items[:8]:
-            c = it.get("content") or it
-            title = c.get("title")
-            if not title:
-                continue
-            out.append({
-                "title": title,
-                "provider": (c.get("provider") or {}).get("displayName"),
-                "url": (c.get("canonicalUrl") or c.get("clickThroughUrl") or {}).get("url"),
-                "time": c.get("pubDate") or c.get("displayTime"),
-            })
-        return out
-    return _cached("news", 900, f) or []
+def _finnhub_news(db, finnhub_enabled: bool) -> dict[str, Any]:
+    if db is None:
+        return {"items": [], "available": False, "reason": "no-db"}
+    hit = db.cache_get("news:market")
+    if not hit or not hit.get("payload"):
+        return {"items": [], "available": False,
+                "reason": "disabled" if not finnhub_enabled else "refreshing"}
+    age = hit.get("age_seconds")
+    if age is not None and age > _NEWS_HARD_LIMIT:
+        return {"items": [], "available": False, "reason": "unavailable",
+                "fetched_at": hit.get("fetched_at")}
+    items = [{"title": it.get("headline"), "provider": it.get("source"), "url": it.get("url")}
+             for it in (hit["payload"] or [])[:8] if it.get("headline")]
+    return {"items": items, "available": bool(items), "fetched_at": hit.get("fetched_at"),
+            "reason": "empty" if not items else None}
 
 
-def build(alpaca, sector_rankings, config, held_symbols) -> dict[str, Any]:
+def _finnhub_earnings(db, held_symbols: list[str], finnhub_enabled: bool,
+                      days: int = 30) -> dict[str, Any]:
+    if db is None:
+        return {"items": [], "available": False, "reason": "no-db"}
+    hit = db.cache_get("earnings:calendar")
+    if not hit or not hit.get("payload"):
+        return {"items": [], "available": False,
+                "reason": "disabled" if not finnhub_enabled else "refreshing"}
+    age = hit.get("age_seconds")
+    if age is not None and age > _EARN_HARD_LIMIT:
+        return {"items": [], "available": False, "reason": "unavailable"}
+    held = {s.upper() for s in (held_symbols or [])}
+    today = datetime.now(timezone.utc).date()
+    out = []
+    for e in (hit["payload"] or {}).get("earningsCalendar", []):
+        sym = str(e.get("symbol", "")).upper()
+        if held and sym not in held:            # "what's coming" = names you hold
+            continue
+        try:
+            d = datetime.fromisoformat(str(e.get("date", ""))).date()
+        except (TypeError, ValueError):
+            continue
+        if 0 <= (d - today).days <= days:
+            out.append({"symbol": sym, "date": e.get("date")})
+    out.sort(key=lambda x: x["date"])
+    return {"items": out, "available": True}     # available even if no held name reports soon
+
+
+def build(alpaca, sector_rankings, config, held_symbols,
+          db=None, finnhub_enabled: bool = False) -> dict[str, Any]:
+    news = _finnhub_news(db, finnhub_enabled)
+    earn = _finnhub_earnings(db, held_symbols, finnhub_enabled)
     return {
         "as_of": datetime.now(timezone.utc).isoformat(),
         "indices": bias_strip.build(alpaca, ["SPY", "QQQ", "IWM"]),
         "vix": _vix(),
         "breadth": _breadth(sector_rankings),
         "economic": _economic(config),
-        "earnings": _earnings(held_symbols),
-        "news": _news(),
+        "earnings": earn["items"],
+        "earnings_available": earn["available"],
+        "news": news["items"],
+        "news_available": news["available"],
+        "news_reason": news.get("reason"),
+        "news_fetched_at": news.get("fetched_at"),
+        "finnhub_enabled": finnhub_enabled,
     }

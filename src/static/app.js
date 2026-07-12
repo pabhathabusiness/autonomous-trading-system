@@ -651,16 +651,25 @@ async function loadMarketOverview() {
       ...(d.earnings || []).map(e => ({ date: e.date, label: e.symbol + ' earnings', kind: 'earn' })),
     ].sort((a, b) => a.date.localeCompare(b.date)).slice(0, 8);
     const calEl = $("mkt-calendar");
-    if (calEl) calEl.innerHTML = cal.length ? cal.map(e =>
+    if (calEl) calEl.innerHTML = (cal.length ? cal.map(e =>
       `<div class="cal-row"><span class="cal-date">${e.date.slice(5)}</span>
-        <span class="cal-label ${e.kind === 'earn' ? 'cal-earn' : ''}">${e.label}</span></div>`).join("")
-      : '<p class="muted">nothing scheduled</p>';
+        <span class="cal-label ${e.kind === 'earn' ? 'cal-earn' : ''}">${scEsc(e.label)}</span></div>`).join("")
+      : '<p class="muted">nothing scheduled</p>')
+      + (d.earnings_available === false ? '<p class="muted" style="font-size:11px">· earnings feed unavailable</p>' : '');
 
     const newsEl = $("mkt-news");
-    if (newsEl) newsEl.innerHTML = (d.news || []).length ? (d.news || []).slice(0, 6).map(n =>
-      `<div class="news-row">${n.url ? `<a href="${n.url}" target="_blank" rel="noopener noreferrer">${n.title}</a>` : n.title}
-        ${n.provider ? `<span class="muted"> · ${n.provider}</span>` : ''}</div>`).join("")
-      : '<p class="muted">no headlines</p>';
+    if (newsEl) {
+      if (!d.news_available) {
+        const msg = d.news_reason === "disabled" ? "Market news — Finnhub not configured"
+          : d.news_reason === "refreshing" ? "Market news — loading (refreshes on the next engine tick)"
+          : "📡 Market news unavailable — Finnhub down or rate-limited";
+        newsEl.innerHTML = `<p class="muted">${msg}</p>`;
+      } else {
+        newsEl.innerHTML = (d.news || []).slice(0, 6).map(n =>
+          `<div class="news-row">${n.url ? `<a href="${scEsc(n.url)}" target="_blank" rel="noopener noreferrer">${scEsc(n.title)}</a>` : scEsc(n.title)}
+            ${n.provider ? `<span class="muted"> · ${scEsc(n.provider)}</span>` : ""}</div>`).join("");
+      }
+    }
   } catch (e) { tiles.innerHTML = `<p class="muted">${e.message}</p>`; }
 }
 

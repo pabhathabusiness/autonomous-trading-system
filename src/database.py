@@ -278,6 +278,22 @@ CREATE TABLE IF NOT EXISTS risk_state (
     updated_at TEXT
 );
 
+-- B3 refusal log: why the risk gate turned a trigger away, deduped per
+-- symbol+lane+reason+day. Makes the SILENT trade-killers visible -- especially
+-- 'unknown_earnings' (a chart trigger outside the Stage-2 shortlist has no
+-- earnings date, so the earnings guard fails closed). A high unknown_earnings
+-- count over a week means the shortlist needs widening.
+CREATE TABLE IF NOT EXISTS order_refusals (
+    day TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    lane TEXT,
+    reason TEXT NOT NULL,       -- unknown_earnings | earnings_blackout | max_open_risk
+                               -- | per_lane_cap | sector_cap | liquidity | not_halted | ...
+    detail TEXT,
+    ts TEXT,
+    UNIQUE(day, symbol, lane, reason)
+);
+
 -- B1 fill event log: partial fills / rejects / cancels captured as discrete
 -- events. The paper_trades columns carry the summary; this is the audit trail.
 CREATE TABLE IF NOT EXISTS order_fills (
@@ -1308,3 +1324,32 @@ class Database:
         with self._conn() as conn:
             rows = conn.execute("SELECT * FROM sim_vs_real LIMIT ?", (limit,)).fetchall()
             return [dict(r) for r in rows]
+
+    def record_refusal(self, symbol: str, lane: Optional[str], reason: str,
+                       detail: Optional[str] = None) -> None:
+        """Log a risk-gate refusal, deduped per symbol+lane+reason+day, so the
+        silent trade-killers (esp. unknown_earnings) are a visible number."""
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO order_refusals (day, symbol, lane, reason, detail, ts)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (_now()[:10], symbol, lane or "", reason, (detail or "")[:300], _now()))
+
+    def refusal_counts(self, days: int = 7) -> dict[str, int]:
+        cut = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT reason, COUNT(*) AS n FROM order_refusals
+                   WHERE day >= ? GROUP BY reason ORDER BY n DESC""", (cut,)).fetchall()
+            return {r["reason"]: int(r["n"]) for r in rows}
+
+    def recent_refusals(self, reason: Optional[str] = None, days: int = 7,
+                        limit: int = 100) -> list[dict[str, Any]]:
+        cut = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+        q = "SELECT * FROM order_refusals WHERE day >= ?"
+        params: list[Any] = [cut]
+        if reason:
+            q += " AND reason = ?"; params.append(reason)
+        q += " ORDER BY ts DESC LIMIT ?"; params.append(limit)
+        with self._conn() as conn:
+            return [dict(r) for r in conn.execute(q, params).fetchall()]

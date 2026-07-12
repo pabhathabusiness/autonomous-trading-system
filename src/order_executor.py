@@ -85,6 +85,21 @@ def execute_candidates(db, alpaca, risk_mgr, config, candidates: list[dict[str, 
     return out
 
 
+def _primary_refusal(decision, ctx) -> str:
+    """The canonical reason a candidate was turned away, for the refusal log. An
+    UNKNOWN earnings date (fail-closed) is distinguished from a real blackout --
+    'unknown_earnings' is the silent trade-killer that means the Stage-2 shortlist
+    is too small (a chart trigger outside it has no earnings date)."""
+    ch = decision.checks
+    if not ch.get("earnings_proximity", True):
+        return "unknown_earnings" if ctx.days_to_earnings is None else "earnings_blackout"
+    for name in ("not_halted", "position_sizing", "max_open_risk", "per_lane_cap",
+                 "sector_cap", "liquidity"):
+        if not ch.get(name, True):
+            return name
+    return "other"
+
+
 def _execute_one(db, alpaca, risk_mgr, config, c: dict[str, Any],
                  account_type: str, equity: float) -> dict[str, Any]:
     symbol = c["symbol"]
@@ -111,8 +126,10 @@ def _execute_one(db, alpaca, risk_mgr, config, c: dict[str, Any],
         days_to_earnings=c.get("days_to_earnings"))
     decision = risk_gate.evaluate(ctx)
     if not decision.approved:
+        reason = _primary_refusal(decision, ctx)
+        db.record_refusal(symbol, c.get("lane"), reason, detail=decision.reason)
         return {"symbol": symbol, "outcome": "refused", "reason": decision.reason,
-                "checks": decision.checks}
+                "checks": decision.checks, "refusal_reason": reason}
 
     # 3. idempotency: same symbol+lane+day => one order only
     coid = _client_order_id(c, account_type)

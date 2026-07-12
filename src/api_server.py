@@ -1035,6 +1035,9 @@ def risk_status() -> dict[str, Any]:
                               if equity else {}),
         "per_lane_cap_pct": lane_cap,
         "limits": r,
+        # refusal log (7d): the silent trade-killers made visible. A high
+        # unknown_earnings count means the Stage-2 shortlist needs widening.
+        "refusals_7d": DB.refusal_counts(7),
     }
 
 

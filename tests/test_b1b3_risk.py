@@ -494,6 +494,109 @@ def test_partial_then_canceled_still_counts_in_caps():
         _rm(path)
 
 
+def test_true_up_multi_step_partial():
+    # partial -> partial -> complete (not just two-step); converges each pass
+    db, path = fresh_db()
+    try:
+        cfg = make_config(); alp = FakeAlpaca(100000, cfg); rm = RiskManager(cfg)
+        order_executor.execute_candidates(db, alp, rm, cfg, [_candidate("AAA")])
+        N = int(db.get_open_algo_trades("algo")[0]["shares"])
+        for q, st, price in [(N // 3, "partially_filled", "3.005"),
+                             (2 * N // 3, "partially_filled", "3.01"),
+                             (N, "filled", "3.02")]:
+            alp._fills = {"ord-AAA": {"id": "ord-AAA", "status": st, "filled_qty": str(q),
+                                      "filled_avg_price": price, "submitted_at": "2026-07-12T14:30:00Z",
+                                      "filled_at": "2026-07-12T14:31:00Z"}}
+            order_executor.reconcile_open_fills(db, alp)
+            assert db.get_open_algo_trades("algo")[0]["filled_qty"] == float(q), q
+        assert abs(db.sum_open_risk("algo") - abs(3.0 - 2.7) * N) < 1e-6
+
+
+    finally:
+        _rm(path)
+
+
+def test_true_up_across_restart():
+    # completion arrives AFTER a restart -> state is reloaded from the DB, not memory
+    db, path = fresh_db()
+    try:
+        cfg = make_config(); alp = FakeAlpaca(100000, cfg); rm = RiskManager(cfg)
+        order_executor.execute_candidates(db, alp, rm, cfg, [_candidate("AAA")])
+        N = int(db.get_open_algo_trades("algo")[0]["shares"]); half = N // 2
+        alp._fills = {"ord-AAA": {"id": "ord-AAA", "status": "partially_filled", "filled_qty": str(half),
+                                  "filled_avg_price": "3.01", "submitted_at": "2026-07-12T14:30:00Z"}}
+        order_executor.reconcile_open_fills(db, alp)
+        db2 = Database(path)                                   # RESTART: fresh handle, same file
+        alp._fills = {"ord-AAA": {"id": "ord-AAA", "status": "filled", "filled_qty": str(N),
+                                  "filled_avg_price": "3.02", "submitted_at": "2026-07-12T14:30:00Z",
+                                  "filled_at": "2026-07-12T14:30:05Z"}}
+        order_executor.reconcile_open_fills(db2, alp)
+        assert db2.get_open_algo_trades("algo")[0]["filled_qty"] == float(N)
+        assert abs(db2.sum_open_risk("algo") - abs(3.0 - 2.7) * N) < 1e-6
+    finally:
+        _rm(path)
+
+
+def test_caps_recompute_after_trueup():
+    # not just qty -- sum_open_risk AND open_notional_by_lane must both move
+    db, path = fresh_db()
+    try:
+        cfg = make_config(); alp = FakeAlpaca(100000, cfg); rm = RiskManager(cfg)
+        order_executor.execute_candidates(db, alp, rm, cfg, [_candidate("AAA", "Energy", "turnaround")])
+        N = int(db.get_open_algo_trades("algo")[0]["shares"]); half = N // 2
+        alp._fills = {"ord-AAA": {"id": "ord-AAA", "status": "partially_filled", "filled_qty": str(half),
+                                  "filled_avg_price": "3.0", "submitted_at": "2026-07-12T14:30:00Z"}}
+        order_executor.reconcile_open_fills(db, alp)
+        risk1, notl1 = db.sum_open_risk("algo"), db.open_notional_by_lane("algo").get("turnaround", 0)
+        alp._fills = {"ord-AAA": {"id": "ord-AAA", "status": "filled", "filled_qty": str(N),
+                                  "filled_avg_price": "3.0", "submitted_at": "2026-07-12T14:30:00Z",
+                                  "filled_at": "2026-07-12T14:31:00Z"}}
+        order_executor.reconcile_open_fills(db, alp)
+        risk2, notl2 = db.sum_open_risk("algo"), db.open_notional_by_lane("algo").get("turnaround", 0)
+        assert risk2 > risk1 and notl2 > notl1, (risk1, risk2, notl1, notl2)
+        assert abs(risk2 - abs(3.0 - 2.7) * N) < 1e-6 and abs(notl2 - 3.0 * N) < 1e-6
+    finally:
+        _rm(path)
+
+
+def test_filled_qty_never_decreases():
+    # a later stale/lower snapshot must NOT lower filled_qty (monotonic true-up)
+    db, path = fresh_db()
+    try:
+        cfg = make_config(); alp = FakeAlpaca(100000, cfg); rm = RiskManager(cfg)
+        order_executor.execute_candidates(db, alp, rm, cfg, [_candidate("AAA")])
+        N = int(db.get_open_algo_trades("algo")[0]["shares"])
+        alp._fills = {"ord-AAA": {"id": "ord-AAA", "status": "filled", "filled_qty": str(N),
+                                  "filled_avg_price": "3.02", "submitted_at": "2026-07-12T14:30:00Z",
+                                  "filled_at": "2026-07-12T14:30:05Z"}}
+        order_executor.reconcile_open_fills(db, alp)
+        alp._fills = {"ord-AAA": {"id": "ord-AAA", "status": "partially_filled", "filled_qty": str(N // 2),
+                                  "filled_avg_price": "2.99", "submitted_at": "2026-07-12T14:30:00Z"}}
+        order_executor.reconcile_open_fills(db, alp)
+        assert db.get_open_algo_trades("algo")[0]["filled_qty"] == float(N)   # unchanged
+    finally:
+        _rm(path)
+
+
+def test_unknown_earnings_refusal_is_logged():
+    # a trigger with no earnings date (outside the Stage-2 shortlist) is refused
+    # unknown_earnings and that refusal is a visible, counted number.
+    db, path = fresh_db()
+    try:
+        cfg = make_config(); alp = FakeAlpaca(100000, cfg); rm = RiskManager(cfg)
+        cand = _candidate("AAA"); cand["days_to_earnings"] = None      # unknown -> fail closed
+        out = order_executor.execute_candidates(db, alp, rm, cfg, [cand])
+        assert out["placed"] == 0 and out["refused"] == 1
+        assert out["results"][0]["refusal_reason"] == "unknown_earnings"
+        assert db.refusal_counts(7).get("unknown_earnings") == 1
+        assert db.recent_refusals(reason="unknown_earnings")[0]["symbol"] == "AAA"
+        # deduped per symbol+lane+reason+day -> a second scan of the same name doesn't double-count
+        order_executor.execute_candidates(db, alp, rm, cfg, [cand])
+        assert db.refusal_counts(7).get("unknown_earnings") == 1
+    finally:
+        _rm(path)
+
+
 def test_orphan_recovery_on_submit_error():
     db, path = fresh_db()
     try:

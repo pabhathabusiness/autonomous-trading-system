@@ -1311,7 +1311,17 @@ function renderScRisk(rs) {
       ${bar(rs.open_risk_pct, rs.max_open_risk_pct, "open risk")}
       ${laneBars}
       <div class="rb"><div class="rb-l">sector caps</div><div class="rb-sectors">${sectorsOver.length ? sectorsOver.map(([s, n]) => `<b>${scEsc(s)} ${n}/${maxSector}</b>`).join(", ") : "all clear (max " + maxSector + "/sector)"}</div></div>
+      ${renderScRefusals(rs.refusals_7d)}
     </div>`;
+}
+
+function renderScRefusals(ref) {
+  if (!ref || !Object.keys(ref).length) return "";
+  const ue = ref.unknown_earnings || 0;
+  const parts = Object.entries(ref).sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `${k === "unknown_earnings" ? '<b class="rb-ue">' + k + " " + v + "</b>" : scEsc(k) + " " + v}`).join(" · ");
+  const warn = ue >= 10 ? ' <span class="rb-ue">(shortlist may need widening)</span>' : "";
+  return `<div class="rb"><div class="rb-l">refused 7d</div><div class="rb-sectors">${parts}${warn}</div></div>`;
 }
 
 function renderScCoverage(cov) {

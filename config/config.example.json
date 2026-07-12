@@ -47,6 +47,11 @@
     "bands": {"day_trade": true, "short_term": true, "swing": true},
     "note": "auto_execute stays FALSE until you deliberately enable it on the server. Only 'algo' (paper) may ever be listed here; real-money accounts are hard-blocked by execution_guard."
   },
+  "smallcap": {
+    "enabled": false,
+    "notional": {"runner": 2500, "bounce": 3000, "value": 4000, "hailmary": 1500},
+    "note": "Addendum 2 quarantined sub-$5 lane. OFF by default. When true, the scheduler runs a daily premarket universe build (~5000 names, needs FINNHUB_KEY) + fast lane scans that auto-open book='smallcap' PAPER trades. Never real, never Alpaca; Hail-Mary is permanently paper + caged (max 2 open). Fully separate from the main book's stats."
+  },
   "sector_leaders": ["AAPL", "MSFT", "NVDA", "GOOGL", "GOOG", "AMZN", "META", "TSLA", "AVGO", "NFLX"],
   "dashboard": {
     "bias_strip": ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA"]

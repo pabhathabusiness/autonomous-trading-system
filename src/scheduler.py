@@ -28,7 +28,7 @@ import threading
 import time
 from datetime import datetime, time as dt_time, timezone
 
-from src import mtf_bias, news_refresher, paper_trader, post_close
+from src import mtf_bias, news_refresher, paper_trader, post_close, smallcap_scan
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +99,11 @@ class AutonomousScheduler:
         self.monitor_interval = max(15, ac.get("monitor_interval_sec", 60))
         self.market_hours_only = ac.get("market_hours_only", True)
         self.auto_execute = ac.get("auto_execute", False)
+        # Addendum 2: quarantined small-cap lane. OFF by default -> deploy is safe
+        # (no 5000-name yfinance build until deliberately enabled).
+        self.smallcap_enabled = (config.get("smallcap", {}) or {}).get("enabled", False)
+        self._sc_last_universe_day = None
+        self._sc_refreshing = False
         self._stop = threading.Event()
         self._lock = threading.Lock()             # serialize our own scan/monitor
         self._thread = None
@@ -131,6 +136,8 @@ class AutonomousScheduler:
             "monitor_interval_sec": self.monitor_interval,
             "last_monitor_at": self.last_monitor_at,
             "last_scan_at": self.last_scan_at,
+            "smallcap_enabled": self.smallcap_enabled,
+            "smallcap_refreshing": self._sc_refreshing,
         }
 
     # --------------------------------------------------------------------- loop
@@ -167,6 +174,32 @@ class AutonomousScheduler:
             result = self.scan_fn()
         self.last_scan_at = datetime.now(timezone.utc).isoformat()
         logger.info("Autonomous scan done: proposals=%s", (result or {}).get("proposals"))
+        # Addendum 2 small-cap lane runs AFTER the main scan, outside its own slow
+        # universe build. Quarantined; never touches the main book.
+        if self.smallcap_enabled and self.finnhub is not None:
+            self._safe(self._smallcap_tick, "smallcap")
+
+    def _smallcap_tick(self) -> None:
+        """Fast lane scan over the current universe (opens quarantined paper
+        triggers), plus a once-a-day universe refresh kicked off in its OWN thread
+        so the ~20-min build never blocks monitoring or the main scan lock."""
+        today = _now_et().date().isoformat()
+        if self._sc_last_universe_day != today and not self._sc_refreshing:
+            self._sc_last_universe_day = today
+            self._sc_refreshing = True
+            threading.Thread(target=self._smallcap_refresh, name="sc-universe", daemon=True).start()
+        # scan_and_open reads the universe rows (fast); safe alongside a bg refresh
+        # thanks to the 15s SQLite busy_timeout
+        smallcap_scan.scan_and_open(self.db, self.finnhub, self.config, open_trades=True)
+
+    def _smallcap_refresh(self) -> None:
+        try:
+            summary = smallcap_scan.refresh_universe(self.db, self.finnhub)
+            logger.info("Small-cap universe refreshed: %s", summary)
+        except Exception:
+            logger.exception("Small-cap universe refresh failed")
+        finally:
+            self._sc_refreshing = False
 
     @staticmethod
     def _safe(fn, label: str) -> None:

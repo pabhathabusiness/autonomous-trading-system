@@ -264,6 +264,9 @@ class Database:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
+        # 15s busy wait so the background small-cap universe build (many quick
+        # upserts) doesn't raise "database is locked" against concurrent reads
+        conn.execute("PRAGMA busy_timeout = 15000")
         try:
             yield conn
             conn.commit()
@@ -331,6 +334,8 @@ class Database:
                 ("mtf_alignment", "TEXT"),
                 # --- Addendum 2: quarantined small-cap lane tag ---
                 ("lane", "TEXT"),   # runner | bounce | value | hailmary (book='smallcap' rows)
+                ("lane_score", "REAL"),     # the lane rubric score at trigger
+                ("trigger_json", "TEXT"),   # reasons/chips/catalyst snapshot
             ],
         }
         for table, cols in migrations.items():
@@ -618,6 +623,35 @@ class Database:
             return [dict(r) for r in conn.execute(
                 "SELECT * FROM smallcap_deathwatch ORDER BY added_at DESC").fetchall()]
 
+    def count_open_smallcap(self, lane: Optional[str] = None) -> int:
+        """Open book='smallcap' trades, optionally one lane -- for the Hail-Mary
+        cage (max 2 open)."""
+        q = "SELECT COUNT(*) FROM paper_trades WHERE book = 'smallcap' AND status = 'open'"
+        params: list[Any] = []
+        if lane:
+            q += " AND lane = ?"; params.append(lane)
+        with self._conn() as conn:
+            return int(conn.execute(q, params).fetchone()[0])
+
+    def get_smallcap_trades(self, *, status: Optional[str] = None,
+                            lane: Optional[str] = None) -> list[dict[str, Any]]:
+        """book='smallcap' trades for the /smallcaps/record page (parsed trigger)."""
+        q = "SELECT * FROM paper_trades WHERE book = 'smallcap'"
+        params: list[Any] = []
+        if status:
+            q += " AND status = ?"; params.append(status)
+        if lane:
+            q += " AND lane = ?"; params.append(lane)
+        q += " ORDER BY entry_date DESC"
+        with self._conn() as conn:
+            rows = [dict(r) for r in conn.execute(q, params).fetchall()]
+        for r in rows:
+            try:
+                r["trigger"] = json.loads(r.get("trigger_json") or "{}")
+            except (TypeError, ValueError):
+                r["trigger"] = {}
+        return rows
+
     def get_proposals(self, status: Optional[str] = None, account_type: Optional[str] = None) -> list[dict[str, Any]]:
         # proposals.direction is authoritative as of 2026-07-11 (Lane 1.4): written
         # at insert time for new rows, backfilled for all 284 older rows. No
@@ -668,7 +702,10 @@ class Database:
         for k in ("book", "source", "archetype", "timeframe_band", "entry_type",
                   "pattern", "rs_vs_spy", "compression_tf", "planned_rr",
                   "process_grade", "process_score", "process_flags", "process_notes",
-                  "shares", "position_value", "market_regime", "mtf_alignment"):
+                  "shares", "position_value", "market_regime", "mtf_alignment",
+                  "lane", "lane_score", "trigger_json",
+                  # proposal-only fields -- None for non-proposal callers (small-caps)
+                  "proposal_id", "account_type", "confidence", "num_edges", "edges_fired"):
             data.setdefault(k, None)
         with self._conn() as conn:
             cur = conn.execute(
@@ -678,14 +715,15 @@ class Database:
                     expected_timeframe, entry_date, max_hold_days, status,
                     book, source, archetype, timeframe_band, entry_type, pattern, rs_vs_spy,
                     compression_tf, planned_rr, process_grade, process_score, process_flags,
-                    process_notes, shares, position_value, market_regime, mtf_alignment)
+                    process_notes, shares, position_value, market_regime, mtf_alignment,
+                    lane, lane_score, trigger_json)
                    SELECT :proposal_id, :symbol, :account_type, :strategy, :direction, :confidence,
                           :num_edges, :edges_fired, :sector_name, :entry_price, :stop_loss,
                           :target_price, :expected_timeframe, :entry_date, :max_hold_days, 'open',
                           :book, :source, :archetype, :timeframe_band, :entry_type, :pattern,
                           :rs_vs_spy, :compression_tf, :planned_rr, :process_grade, :process_score,
                           :process_flags, :process_notes, :shares, :position_value,
-                          :market_regime, :mtf_alignment
+                          :market_regime, :mtf_alignment, :lane, :lane_score, :trigger_json
                    WHERE NOT EXISTS (
                        SELECT 1 FROM paper_trades
                        WHERE symbol = :symbol AND strategy = :strategy AND status = 'open'

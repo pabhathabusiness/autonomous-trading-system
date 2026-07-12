@@ -1,0 +1,72 @@
+"""
+Addendum 2 -- small-cap scan orchestration.
+
+Two responsibilities, split by cadence:
+  refresh_universe() -- the slow daily premarket screen+enrich (build_universe).
+  scan_and_open()    -- fast: read the universe rows, evaluate the four lanes,
+                        apply the sector_early bonus (needs the full trigger set,
+                        so it's a second pass), and open each trigger as a
+                        quarantined paper trade.
+
+Everything here reads/writes ONLY small-cap surfaces (smallcap_universe, the
+'smallcap' book, sc:* cache keys). Nothing touches the main book.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timezone
+from typing import Any, Optional
+
+from src.database import Database
+from src.finnhub_client import FinnhubClient
+from src import smallcap_universe as scu, smallcap_lanes as L, smallcap_sector as sec
+from src import smallcap_trader
+
+logger = logging.getLogger(__name__)
+TRIGGERS_KEY = "sc:triggers"
+
+
+def refresh_universe(db: Database, fh: FinnhubClient, **kw) -> dict[str, Any]:
+    """Daily premarket build. Slow (full screen) -- callers gate on cadence."""
+    return scu.build_universe(db, fh, **kw)
+
+
+def scan_and_open(db: Database, fh: Optional[FinnhubClient] = None,
+                  config: Optional[dict] = None, *, open_trades: bool = True) -> dict[str, Any]:
+    """Evaluate lanes over the current universe, apply sector_early, open triggers.
+    Returns a summary; caches the trigger set + sector heat for the page."""
+    rows = db.get_smallcap_universe()
+
+    triggers: list[dict[str, Any]] = []
+    for row in rows:
+        for t in L.evaluate_all(row):
+            t["_signals"] = row.get("signals")   # for the opener's level math
+            triggers.append(t)
+
+    # sector heat needs the whole trigger set -> second-pass sector_early bonus
+    heat = sec.compute_sector_heat(db, triggers)
+    for t in triggers:
+        if sec.is_sector_early(heat, t.get("sector_name")) and "SECTOR EARLY" not in t["chips"]:
+            t["score"] = round(t["score"] + 10, 1)
+            t["chips"].append("SECTOR EARLY")
+            t.setdefault("components", {})["sector_early_bonus"] = 10.0
+
+    opened = 0
+    if open_trades:
+        for t in sorted(triggers, key=lambda x: x["score"], reverse=True):
+            if smallcap_trader.open_smallcap_trigger(db, t, config):
+                opened += 1
+
+    clean = [{k: v for k, v in t.items() if k != "_signals"} for t in triggers]
+    db.cache_put(TRIGGERS_KEY, {"as_of": datetime.now(timezone.utc).isoformat(),
+                                "triggers": clean, "sector_heat": heat})
+    summary = {"universe": len(rows), "triggers": len(triggers), "opened": opened,
+               "sectors": len(heat)}
+    logger.info("smallcap scan: %s", summary)
+    return summary
+
+
+def latest_triggers(db: Database) -> dict[str, Any]:
+    """Cached trigger set + sector heat for the /smallcaps page."""
+    return (db.cache_get(TRIGGERS_KEY) or {}).get("payload") or {"triggers": [], "sector_heat": {}}

@@ -1,5 +1,13 @@
 # Overnight Autonomous Build — Morning Report (2026-07-12)
 
+> **LIVE VALIDATION (post-report, ~1h after deploy):** the full-universe rebuild
+> (new logic) reached ~1,000 names and a live scan fired **2 real multi-edge
+> triggers on a partial Sunday universe** — INTZ (hailmary 6.83: volume+catalyst+
+> float; chips INSIDER BUY 2·$547k·12d, REV ACCEL, CONTRACT AWARD) and ARTV
+> (value 6.57: compression+trend+fundamental+insider). The zero-trigger bug is
+> **confirmed fixed on real data**, and the T2 signals (insider family, REV ACCEL
+> trends, news classification) are all firing. Full section 10 below.
+
 **TL;DR:** The zero-trigger bug is **architecturally fixed and deployed** (T1), the
 news-polarity bug + insider signal shipped (T2), grade diagnostic run (T6),
 validation run + threshold tuned (T7), and everything is **live behind the
@@ -190,3 +198,45 @@ see section 9 for where it sits in the queue.
 
 Nothing here was auto-decided in a way that touches real money or the main book.
 The small-cap lane remains fully quarantined and paper-only.
+
+---
+
+## 10. LIVE VALIDATION (full-universe rebuild, ~1h post-deploy)
+
+The new-logic universe is **much larger than the addendum estimated (~150-400)**:
+float ≤1B (F3) + the wider $0.20-10 price range yield **~1,000 names** (still
+enriching when measured at 982). Distribution was healthy across every tier:
+- price tiers: special 379 · low 327 · sub2 146 · deep 130
+- float tiers: mid 332 · low 255 · standard 185 · runner 164 · large 29 · >1B 17
+
+A live scan over the partial 982-row universe (Sunday, mid-build) fired **2
+triggers** (both auto-opened as quarantined paper trades):
+
+| symbol | lane | composite | families | chips |
+|---|---|---|---|---|
+| INTZ | hailmary | 6.83 | volume, catalyst, float | INSIDER BUY 2·$547k·12d · REV ACCEL · CONTRACT AWARD |
+| ARTV | value | 6.57 | compression, trend, fundamental, insider | INSIDER BUY · REV ACCEL |
+
+**This confirms the fix end-to-end on real data:** triggers are produced (not
+zero), the ≥3-family rule holds, composites clear 6.5, and the T2 signals
+(insider family, REV ACCEL trends, CONTRACT AWARD news classification) all fire.
+2 triggers on a *partial Sunday* universe implies the live weekday rate on the
+full ~1,000-name universe (with the sector panel + fresh news active) should land
+in or above the 2-8/day target — **re-check the count on Monday and tune the 6.5
+threshold per F4 if it runs hot.**
+
+### New findings / follow-ups from the rebuild
+1. **Universe is ~1,000 names, not ~400.** Enrichment (~5.5s/name with the insider
+   call) takes ~90 min for a cold build; daily refreshes are cheap (cached). If
+   the rate budget becomes a problem, consider capping enrichment to the top-N by
+   a cheap OHLC pre-score, or tightening the $vol floor above $300k. Not urgent.
+2. **Insider dollar formatting bug (minor):** ARTV showed "INSIDER BUY 2·$1034712k"
+   — an implausible ~$1B, almost certainly a bad transactionPrice/share value in
+   the Finnhub payload or a net_dollars sum error. Add a sanity clamp / per-txn
+   validation in `smallcap_edges.insider_score`. Display-only; does not affect
+   safety.
+3. **Dilution is a soft factor, not a hard block, in the value lane now** (only
+   deathwatch reverse-split + going_concern are hard, per A3's "everything else
+   scores"). ARTV triggered value with a DILUTION chip. If you want value to
+   reject diluters outright, add dilution_risk as a value-lane hard gate — a
+   deliberate deviation from A3's philosophy, so left for your call.

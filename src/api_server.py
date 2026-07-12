@@ -775,6 +775,21 @@ def news_market() -> dict[str, Any]:
     return _cached_news("news:market")
 
 
+@app.get("/api/news/clusters")
+def news_clusters() -> dict[str, Any]:
+    """Addendum 7: auto-clustered trending news (cache read only; the refresher
+    computes it). Each cluster is tagged with YOUR EXPOSURE -- open-trade symbols
+    named in it -- so 'news -> am I exposed?' is one glance."""
+    hit = DB.cache_get("news:clusters")
+    payload = (hit or {}).get("payload") or {"clusters": [], "regime_tilt": None}
+    held = {t["symbol"] for t in DB.get_paper_trades(status="open")}
+    for cl in payload.get("clusters", []):
+        cl["your_exposure"] = sorted(s for s in cl.get("tickers", []) if s in held)
+    return {**payload, "fetched_at": (hit or {}).get("fetched_at"),
+            "stale": hit is None or (hit.get("age_seconds") or 1e9) > 1800,
+            "finnhub_enabled": FINNHUB.enabled}
+
+
 @app.get("/api/news/symbol/{ticker}")
 def news_symbol(ticker: str) -> dict[str, Any]:
     news_refresher.register_interest("symbol", ticker)   # lazy refresh registration

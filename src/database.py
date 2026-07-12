@@ -208,6 +208,20 @@ CREATE TABLE IF NOT EXISTS mtf_conflicts (
     note TEXT
 );
 
+-- Addendum 7: append-only news store (no auto-delete -- needed for the 30d
+-- trending baseline and to reconstruct "what news was visible when this trade
+-- triggered". Dedup by headline hash.)
+CREATE TABLE IF NOT EXISTS news_items (
+    hash TEXT PRIMARY KEY,
+    symbol TEXT,
+    headline TEXT,
+    source TEXT,
+    url TEXT,
+    published_ts INTEGER,      -- unix seconds (from Finnhub 'datetime')
+    first_seen TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_news_items_ts ON news_items(published_ts);
+
 -- Addendum 2 (quarantined small-cap lane). Daily-refreshed screen snapshot.
 -- Finnhub-sourced fields (float_shares, so_proxy, dilution_risk, upside_to_target_pct,
 -- has_options/options_liquid/has_leaps) stay NULL until FINNHUB_KEY is set + verified;
@@ -508,6 +522,37 @@ class Database:
             )
 
     # ------------------------------------------------------- news/earnings cache
+    def insert_news_items(self, items: list[dict[str, Any]]) -> int:
+        """Append-only news store (Addendum 7); dedup on headline hash. Returns
+        the number of NEW rows inserted."""
+        if not items:
+            return 0
+        n = 0
+        with self._conn() as conn:
+            for it in items:
+                h = it.get("hash")
+                if not h:
+                    continue
+                cur = conn.execute(
+                    """INSERT OR IGNORE INTO news_items
+                       (hash, symbol, headline, source, url, published_ts, first_seen)
+                       VALUES (?,?,?,?,?,?,?)""",
+                    (h, (it.get("symbol") or None), it.get("headline"), it.get("source"),
+                     it.get("url"), it.get("datetime"), _now()))
+                n += cur.rowcount
+        return n
+
+    def get_news_items(self, since_ts: int, symbol: Optional[str] = None) -> list[dict[str, Any]]:
+        """News published since a unix timestamp (for 24h clustering + 30d baseline)."""
+        q = "SELECT hash, symbol, headline, source, url, published_ts FROM news_items WHERE published_ts >= ?"
+        params: list[Any] = [since_ts]
+        if symbol:
+            q += " AND symbol = ?"; params.append(symbol.upper())
+        with self._conn() as conn:
+            return [{"hash": r["hash"], "symbol": r["symbol"], "headline": r["headline"],
+                     "source": r["source"], "url": r["url"], "datetime": r["published_ts"]}
+                    for r in conn.execute(q, params).fetchall()]
+
     def cache_get(self, key: str) -> Optional[dict[str, Any]]:
         """{'payload': .., 'fetched_at': iso, 'age_seconds': float} or None."""
         with self._conn() as conn:

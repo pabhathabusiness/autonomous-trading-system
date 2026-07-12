@@ -88,7 +88,9 @@ def tick(db, fh) -> int:
         if _stale(db, "news:market", MARKET_TTL):
             raw = fh.market_news(); calls += 1
             if raw is not None:
-                db.cache_put("news:market", _norm_items(raw))
+                items = _norm_items(raw)
+                db.cache_put("news:market", items)
+                db.insert_news_items(items)                 # A7 append-only store
         if _stale(db, "earnings:calendar", EARNINGS_TTL):
             raw = fh.earnings_calendar(days_ahead=30); calls += 1
             if raw is not None:
@@ -102,7 +104,11 @@ def tick(db, fh) -> int:
             if kind == "symbol" and _stale(db, f"news:symbol:{name}", SYMBOL_TTL):
                 raw = fh.company_news(name); calls += 1
                 if raw is not None:
-                    db.cache_put(f"news:symbol:{name}", _norm_items(raw, limit=15))
+                    items = _norm_items(raw, limit=15)
+                    for it in items:
+                        it["symbol"] = name
+                    db.cache_put(f"news:symbol:{name}", items)
+                    db.insert_news_items(items)             # A7 append-only store
             elif kind == "sector" and _stale(db, f"news:sector:{name}", SYMBOL_TTL):
                 merged: list[dict[str, Any]] = []
                 for sym in SECTOR_HOLDINGS.get(name, [])[:5]:
@@ -119,6 +125,13 @@ def tick(db, fh) -> int:
                 db.cache_put(f"news:sector:{name}", dedup[:20])
     except Exception:
         logger.exception("news_refresher tick failed")
+    # A7: recompute news clusters over the append-only store (pure text math,
+    # zero API cost) -- wrapped so a clustering error never breaks the refresh
+    try:
+        from src import news_cluster
+        news_cluster.compute_clusters(db)
+    except Exception:
+        logger.exception("news cluster compute failed")
     if calls:
         logger.info("news_refresher: %d Finnhub calls this tick", calls)
     return calls

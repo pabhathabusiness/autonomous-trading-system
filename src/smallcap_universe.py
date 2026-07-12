@@ -213,7 +213,7 @@ def enrich_symbol(db: Database, fh: FinnhubClient, symbol: str,
     import yfinance as yf
     if df is None:
         tk = yf.Ticker(symbol)
-        df = tk.history(period="15mo", interval="1d", auto_adjust=True)   # >200 bars for sma200
+        df = tk.history(period="2y", interval="1d", auto_adjust=True)   # sma200 + 18mo split lookback
         splits = tk.splits if splits is None else splits
 
     sig = ss.compute_ohlc_signals(df)
@@ -300,8 +300,11 @@ def build_universe(db: Database, fh: FinnhubClient, *, symbols: Optional[list[st
     for i in range(0, len(cands), batch):
         chunk = cands[i:i + batch]
         try:
-            data = yf.download(chunk, period="15mo", interval="1d", auto_adjust=True,
-                               group_by="ticker", threads=True, progress=False)
+            # actions=True brings a "Stock Splits" column in the SAME batch, so we
+            # never make per-name yf.Ticker(sym).splits calls (which Yahoo
+            # rate-limits/blocks right after a large batch -> whole build errors)
+            data = yf.download(chunk, period="2y", interval="1d", auto_adjust=True,
+                               group_by="ticker", threads=True, progress=False, actions=True)
         except Exception as exc:
             logger.debug("batch download failed: %s", exc)
             continue
@@ -323,7 +326,16 @@ def build_universe(db: Database, fh: FinnhubClient, *, symbols: Optional[list[st
         survivors = survivors[:max_enrich]
     for sym, sub in survivors:
         try:
-            r = enrich_symbol(db, fh, sym, df=sub, splits=yf.Ticker(sym).splits)
+            # splits come from the batch's "Stock Splits" column (non-zero = a
+            # split event); resilient to the column being absent
+            splits = None
+            try:
+                if "Stock Splits" in sub:
+                    ss = sub["Stock Splits"]
+                    splits = ss[ss != 0]
+            except Exception:
+                splits = None
+            r = enrich_symbol(db, fh, sym, df=sub, splits=splits)
             counts[r["status"]] = counts.get(r["status"], 0) + 1
         except Exception as exc:
             logger.debug("enrich %s failed: %s", sym, exc)

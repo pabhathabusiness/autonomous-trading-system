@@ -29,6 +29,7 @@ from src import bias_strip as bias_strip_module
 from src import drilldown as drilldown_module
 from src import live as live_module
 from src import market_overview as market_overview_module
+from src import mtf_bias
 from src import news_refresher
 from src.finnhub_client import FinnhubClient
 from src import paper_trader
@@ -67,6 +68,11 @@ def run_full_scan(config: dict[str, Any], db: Database, rh_client: RobinhoodClie
     screen -> technical analysis -> proposals. Read-only / analysis-only;
     never places an order."""
     market = MarketAnalyzer(config).analyze_and_store(db)
+    # Lane 4: keep the market-bias panel/regime fresh (TTL ~12h inside)
+    try:
+        mtf_bias.refresh_panel(db)
+    except Exception:
+        logger.exception("bias panel refresh failed")
 
     # each scan is a clean snapshot -- retire last scan's untouched proposals
     db.expire_pending_proposals()
@@ -102,6 +108,7 @@ def run_full_scan(config: dict[str, Any], db: Database, rh_client: RobinhoodClie
         for p in proposals:
             analysis = p.pop("_analysis")
             db.insert_technical_analysis({**analysis, "symbol": p["symbol"]})
+            mtf_bias.apply_to_proposal(db, p, analysis)   # Lane 4 stamp + penalty + conflict log
             pid = db.insert_proposal(p)
             # Autonomous Algo book (Log B), graded at open
             paper_trader.open_from_proposal(db, p, pid, analysis={**analysis, "symbol": p["symbol"]},
@@ -193,6 +200,7 @@ def generate_short_term_ideas(
                           f"stop {a['stop_loss']} / target {a['target_price']} = {a['risk_reward']}:1, "
                           f"~{a['expected_return_pct']}% in {a['expected_timeframe']}."),
         }
+        mtf_bias.apply_to_proposal(db, proposal, a)   # Lane 4 stamp + penalty + conflict log
         pid = db.insert_proposal(proposal)
         paper_trader.open_from_proposal(db, proposal, pid, analysis=a, config=config)
         stored += 1
@@ -270,6 +278,7 @@ def generate_downside_ideas(
                           f"stop {a['stop_loss']} (above) / target {a['target_price']} (below) = "
                           f"{a['risk_reward']}:1, ~{a['expected_return_pct']}% if it falls."),
         }
+        mtf_bias.apply_to_proposal(db, proposal, a)   # Lane 4 stamp + penalty + conflict log
         pid = db.insert_proposal(proposal)
         paper_trader.open_from_proposal(db, proposal, pid, analysis=a, config=config)
         stored += 1
@@ -336,6 +345,7 @@ def generate_coiling_ideas(
                           f"Watch for breakout above {a['entry_price']}; target {a['target_price']}, "
                           f"stop {a['stop_loss']}."),
         }
+        mtf_bias.apply_to_proposal(db, proposal, a)   # Lane 4 stamp + penalty + conflict log
         pid = db.insert_proposal(proposal)
         paper_trader.open_from_proposal(db, proposal, pid, analysis=a, config=config)
         stored += 1
@@ -735,6 +745,18 @@ def _stop_scheduler() -> None:
 @app.get("/api/scheduler")
 def scheduler_status() -> dict[str, Any]:
     return SCHEDULER.status()
+
+
+@app.get("/api/market-bias")
+def get_market_bias() -> dict[str, Any]:
+    """Lane 4 panel: weekly bias for SPY/QQQ/IWM/DIA/RSP + 11 SPDRs + Mag7,
+    RS vs SPY, 20w-EMA distance, weekly squeeze, and the regime roll-up.
+    Cache read only -- the scheduler/scan refreshes it (TTL ~12h)."""
+    hit = DB.cache_get(mtf_bias.PANEL_KEY)
+    if not hit:
+        return {"regime": None, "indexes": [], "sectors": [], "mag7": [],
+                "as_of": None, "stale": True}
+    return {**hit["payload"], "stale": (hit.get("age_seconds") or 0) > 24 * 3600}
 
 
 # ---- Phase 4: Finnhub-backed cached news/earnings routes (cache reads ONLY;

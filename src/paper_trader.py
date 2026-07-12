@@ -125,6 +125,9 @@ def open_from_proposal(db: Database, proposal: dict, proposal_id: int, *,
         "book": book, "source": source,
         "shares": shares,
         "position_value": round(shares * entry, 2) if shares and entry else None,
+        # Lane 4: regime + MTF context stamped by mtf_bias.apply_to_proposal
+        "market_regime": proposal.get("market_regime"),
+        "mtf_alignment": proposal.get("mtf_alignment"),
         **gf,
     })
     if gf.get("process_grade") == "UNGRADED":

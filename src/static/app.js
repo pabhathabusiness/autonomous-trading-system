@@ -664,6 +664,71 @@ async function loadMarketOverview() {
   } catch (e) { tiles.innerHTML = `<p class="muted">${e.message}</p>`; }
 }
 
+// ============ Lane 4: weekly bias strip + regime + news drawer ============
+let mbiasPanel = null;
+const bArrow = (b) => b === 'bullish' ? '<span class="pos">▲</span>' : b === 'bearish' ? '<span class="neg">▼</span>' : '<span class="muted">·</span>';
+
+async function loadMarketBias() {
+  const el = $("mbias-strip"); if (!el) return;
+  try {
+    const d = await fetchJSON("/api/market-bias");
+    mbiasPanel = d;
+    const reg = $("mbias-regime");
+    if (reg) reg.innerHTML = d.regime
+      ? `regime: <b class="${d.regime === 'risk_on' ? 'pos' : d.regime === 'risk_off' ? 'neg' : ''}">${d.regime}</b> · ${d.mag7_bullish ?? '—'}/7 Mag7 bullish ${d.stale ? '· <span class="neg">stale</span>' : ''}`
+      : 'no panel yet — refreshes on the next engine tick';
+    if (!d.indexes || !d.indexes.length) { el.innerHTML = '<p class="muted">Panel populates on the engine’s next tick (~daily refresh).</p>'; return; }
+    const chip = (r, kind) => `<button class="chip bchip" onclick="openDrawer('${kind}','${r.symbol}')">
+        ${r.symbol} ${bArrow(r.bias)}${r.weekly_squeeze ? ' <span class="mtf-tag" title="weekly squeeze">SQ</span>' : ''}</button>`;
+    el.innerHTML =
+      `<div class="facetrow"><span class="facetlabel">Indexes</span>${d.indexes.map(r => chip(r, 'symbol')).join("")}</div>
+       <div class="facetrow"><span class="facetlabel">Mag 7</span>${(d.mag7 || []).map(r => chip(r, 'symbol')).join("")}</div>
+       <div class="facetrow"><span class="facetlabel">Sectors</span>${(d.sectors || []).map(r => chip(r, 'sector')).join("")}</div>`;
+  } catch (e) { el.innerHTML = `<p class="muted">${e.message}</p>`; }
+}
+
+let drawerItems = [], drawerShown = 0;
+function closeDrawer() { $("news-drawer").classList.remove("open"); }
+async function openDrawer(kind, name) {
+  const head = $("drawer-head"), body = $("drawer-body");
+  const rows = [...(mbiasPanel?.indexes || []), ...(mbiasPanel?.sectors || []), ...(mbiasPanel?.mag7 || [])];
+  const r = rows.find(x => x.symbol === name) || {};
+  // open-trade / proposal tie-in ("am I exposed to this?")
+  const tie = Object.values(algoIndex).find(t => t.status === 'open' &&
+    (t.symbol === name || (kind === 'sector' && false)));
+  head.innerHTML = `<strong>${name}</strong>
+    <span class="biastag ${r.bias === 'bullish' ? 'biastag-bull' : r.bias === 'bearish' ? 'biastag-bear' : 'biastag-neut'}">${r.bias || '—'} W</span>
+    ${r.rs_vs_spy != null ? `<span class="${r.rs_vs_spy >= 0 ? 'pos' : 'neg'}" style="font-size:12px">RS ${signed(r.rs_vs_spy, 1)}%</span>` : ''}
+    <span id="drawer-eps"></span>
+    ${tie ? `<button class="chip" onclick="closeDrawer();openTrade(${tie.id})">open trade: ${tie.symbol} ${gradeText(tie.process_grade)}</button>` : ''}
+    <button class="sheet-x" style="margin-left:auto" onclick="closeDrawer()">✕</button>`;
+  body.innerHTML = '<p class="muted">loading cached headlines…</p>';
+  $("news-drawer").classList.add("open");
+  try {
+    const [news, earn] = await Promise.all([
+      fetchJSON(kind === 'sector' ? `/api/news/sector/${name}` : `/api/news/symbol/${name}`),
+      fetchJSON(`/api/earnings/upcoming?days=14`).catch(() => null)]);
+    const mine = earn && earn.earnings ? earn.earnings.find(e => e.symbol === name) : null;
+    const eps = $("drawer-eps");
+    if (eps && mine) eps.innerHTML = `<span class="chip" style="color:var(--yellow)">EPS in ${mine.days_away}d</span>`;
+    drawerItems = news.items || []; drawerShown = 0;
+    renderDrawerItems(name, news.finnhub_enabled);
+  } catch (e) { body.innerHTML = `<p class="muted">${e.message}</p>`; }
+}
+function renderDrawerItems(name, enabled) {
+  const body = $("drawer-body");
+  drawerShown = Math.min(drawerItems.length, drawerShown + 10);
+  if (!drawerItems.length) {
+    body.innerHTML = `<p class="muted">No news cached for ${name} in the last 7 days${enabled === false ? ' (Finnhub key not set)' : ''}.</p>`;
+    return;
+  }
+  const ago = (ts) => { if (!ts) return ''; const h = Math.round((Date.now() / 1000 - ts) / 3600); return h < 1 ? 'now' : h < 24 ? h + 'h ago' : Math.round(h / 24) + 'd ago'; };
+  body.innerHTML = drawerItems.slice(0, drawerShown).map(n =>
+    `<div class="news-row">${n.url ? `<a href="${n.url}" target="_blank" rel="noopener noreferrer">${n.headline}</a>` : n.headline}
+      <span class="muted"> · ${n.source || ''} · ${ago(n.datetime)}${n.holding ? ' · ' + n.holding : ''}</span></div>`).join("") +
+    (drawerShown < drawerItems.length ? `<button class="chip" style="margin-top:8px" onclick="renderDrawerItems('${name}')">load more (${drawerItems.length - drawerShown} cached)</button>` : '');
+}
+
 function setupChip(t) {
   return t.legacy ? '<span class="chip chip-legacy" title="opened before the grading path existed">legacy</span>'
     : `<span class="chip chip-arch">${archLabel(t.archetype)}</span>`;
@@ -696,7 +761,9 @@ function ideaRow(t) {
         ${setupChip(t)}
         <span class="chip chip-tf">${bandLabel(t.timeframe_band)}</span>
         <span class="chip chip-strat">${t.strategy}</span>
-        ${t.quality_score != null ? `<span class="chip chip-q">${num(t.quality_score, 1)}/10</span>` : ''}</div>
+        ${t.quality_score != null ? `<span class="chip chip-q">${num(t.quality_score, 1)}/10</span>` : ''}
+        ${t.mtf_alignment ? `<span class="chip chip-mtf" title="W/D/4h/1h bias at open">MTF: ${t.mtf_alignment}</span>` : ''}
+        ${t.market_regime ? `<span class="chip chip-q">${t.market_regime}</span>` : ''}</div>
       <span class="i-sub muted">${planLine}${liveLine}</span></div>
     <div class="i-rr"><div class="v">${num(t.risk_reward, 1)}:1</div><div class="l">R:R</div></div>
     ${gradeBadge(t, false)}
@@ -1120,7 +1187,7 @@ function currentView() {
 function switchView(v) {
   document.querySelectorAll(".navtab").forEach(t => t.classList.toggle("active", t.dataset.view === v));
   document.querySelectorAll(".view").forEach(s => s.classList.toggle("active", s.id === "view-" + v));
-  if (v === "dashboard") { loadMarketOverview(); loadBiasStrip(); loadSectorBoard(); loadAlgo(); }
+  if (v === "dashboard") { loadMarketOverview(); loadMarketBias(); loadBiasStrip(); loadSectorBoard(); loadAlgo(); }
   else if (v === "track") { loadAlgo(); }
   else if (v === "sectors") { loadSectors(); }
   else if (v === "more") { loadAll(); }
@@ -1142,6 +1209,7 @@ document.querySelectorAll(".tab").forEach(tab => {
 // initial paint: dashboard (default view) + engine status, and the detailed
 // "More" panels in the background so switching to them is instant.
 loadMarketOverview();
+loadMarketBias();
 loadBiasStrip();
 loadSectorBoard();
 loadAlgo();
@@ -1156,6 +1224,7 @@ setInterval(() => {
   else if (v === "track") { loadAlgo(); }
 }, 6000);
 setInterval(loadEngineStatus, 15000);
-setInterval(() => { if (currentView() === "dashboard") { loadMarketOverview(); } }, 60000);
+setInterval(() => { if (currentView() === "dashboard") { loadMarketOverview(); loadMarketBias(); } }, 60000);
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeDrawer(); });
 setInterval(() => { if (currentView() === "more") { loadLive(); } }, 5000);
 setInterval(() => { if (currentView() === "more") { loadAll(); } }, 30000);

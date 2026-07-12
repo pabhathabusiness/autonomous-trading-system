@@ -322,6 +322,17 @@ tbody tr:hover { background: rgba(255,255,255,0.03); }
 .rangeblock input[type=range] { width: 150px; accent-color: var(--grade); height: 14px; }
 .tablewrap { overflow-x: auto; }
 table.track sup { color: var(--grade); font-size: 9px; }
+
+/* Lane 4: weekly bias strip + news drawer */
+.bchip { font-weight: 700; }
+.chip-mtf { color: #b9a8f5; border: 1px dashed var(--grade); font-family: ui-monospace, Menlo, monospace; }
+.drawer { position: fixed; left: 0; right: 0; bottom: 0; z-index: 55; background: var(--card-bg);
+  border-top: 1px solid var(--grade); box-shadow: 0 -12px 40px rgba(0,0,0,.5);
+  transform: translateY(100%); transition: transform .2s ease; max-height: 45vh; overflow-y: auto; }
+.drawer.open { transform: translateY(0); }
+.drawer-head { position: sticky; top: 0; display: flex; align-items: center; gap: 10px;
+  padding: 12px 18px; background: var(--card-bg); border-bottom: 1px solid var(--border); }
+.drawer-body { padding: 12px 18px 20px; }
 .chip-legacy { color: var(--muted); background: rgba(255,255,255,0.05); border: 1px dashed var(--border); }
 .chip-q { color: var(--muted); border: 1px solid var(--border); }
 

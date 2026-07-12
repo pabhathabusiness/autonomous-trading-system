@@ -195,6 +195,18 @@ CREATE TABLE IF NOT EXISTS news_cache (
     payload_json TEXT,
     fetched_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS mtf_conflicts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    strategy TEXT,
+    direction TEXT,
+    band TEXT,
+    biases_json TEXT,
+    label TEXT,
+    note TEXT
+);
 """
 
 
@@ -238,6 +250,11 @@ class Database:
                 ("direction", "TEXT"),
                 # Phase 4a: event risk at proposal time, from the earnings cache
                 ("days_to_earnings", "INTEGER"),
+                # Lane 4: regime + MTF read + RS stamped at proposal time so all
+                # future trades are fully gradable with zero gaps
+                ("market_regime", "TEXT"),
+                ("mtf_alignment", "TEXT"),
+                ("rs_vs_spy", "REAL"),
             ],
             "paper_trades": [
                 ("direction", "TEXT"),
@@ -270,6 +287,9 @@ class Database:
                 ("retro_grade", "TEXT"),   # A..F, shown as R-A..R-F (outline badge)
                 ("retro_score", "REAL"),   # 0-100 rubric score behind retro_grade
                 ("quadrant", "TEXT"),      # skill_win | lucky_win | good_loss | bad_loss
+                # --- Lane 4: regime + MTF context at open ---
+                ("market_regime", "TEXT"),
+                ("mtf_alignment", "TEXT"),
             ],
         }
         for table, cols in migrations.items():
@@ -392,24 +412,41 @@ class Database:
         # Phase 4a: event risk stamped at write time from the cached earnings
         # calendar (None when the cache is empty/keyless -- display handles it).
         data.setdefault("days_to_earnings", self.days_to_earnings(data.get("symbol")))
+        # Lane 4: regime + MTF + RS context (generators supply; default NULL)
+        for k in ("market_regime", "mtf_alignment", "rs_vs_spy"):
+            data.setdefault(k, None)
         with self._conn() as conn:
             cur = conn.execute(
                 """INSERT INTO proposals
                    (created_at, account_type, symbol, sector_name, entry_price,
                     stop_loss, target_price, risk_reward, quality_score,
                     confidence, num_edges, edges_fired, strategy, direction,
-                    days_to_earnings, position_size_usd, shares, risk_amount,
+                    days_to_earnings, market_regime, mtf_alignment, rs_vs_spy,
+                    position_size_usd, shares, risk_amount,
                     expected_return_pct, expected_timeframe, reasoning, status)
                    VALUES (:created_at, :account_type, :symbol, :sector_name,
                            :entry_price, :stop_loss, :target_price, :risk_reward,
                            :quality_score, :confidence, :num_edges, :edges_fired,
                            :strategy, :direction, :days_to_earnings,
+                           :market_regime, :mtf_alignment, :rs_vs_spy,
                            :position_size_usd, :shares, :risk_amount,
                            :expected_return_pct, :expected_timeframe, :reasoning,
                            'pending')""",
                 {"created_at": _now(), **data},
             )
             return cur.lastrowid
+
+    def insert_mtf_conflict(self, data: dict[str, Any]) -> None:
+        """Lane 4: log every thesis-TF conflict with raw inputs (2-week review)."""
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO mtf_conflicts (ts, symbol, strategy, direction, band,
+                                              biases_json, label, note)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (_now(), data.get("symbol"), data.get("strategy"), data.get("direction"),
+                 data.get("band"), json.dumps(data.get("biases") or {}),
+                 data.get("label"), data.get("note")),
+            )
 
     # ------------------------------------------------------- news/earnings cache
     def cache_get(self, key: str) -> Optional[dict[str, Any]]:
@@ -516,7 +553,7 @@ class Database:
         for k in ("book", "source", "archetype", "timeframe_band", "entry_type",
                   "pattern", "rs_vs_spy", "compression_tf", "planned_rr",
                   "process_grade", "process_score", "process_flags", "process_notes",
-                  "shares", "position_value"):
+                  "shares", "position_value", "market_regime", "mtf_alignment"):
             data.setdefault(k, None)
         with self._conn() as conn:
             cur = conn.execute(
@@ -526,13 +563,14 @@ class Database:
                     expected_timeframe, entry_date, max_hold_days, status,
                     book, source, archetype, timeframe_band, entry_type, pattern, rs_vs_spy,
                     compression_tf, planned_rr, process_grade, process_score, process_flags,
-                    process_notes, shares, position_value)
+                    process_notes, shares, position_value, market_regime, mtf_alignment)
                    SELECT :proposal_id, :symbol, :account_type, :strategy, :direction, :confidence,
                           :num_edges, :edges_fired, :sector_name, :entry_price, :stop_loss,
                           :target_price, :expected_timeframe, :entry_date, :max_hold_days, 'open',
                           :book, :source, :archetype, :timeframe_band, :entry_type, :pattern,
                           :rs_vs_spy, :compression_tf, :planned_rr, :process_grade, :process_score,
-                          :process_flags, :process_notes, :shares, :position_value
+                          :process_flags, :process_notes, :shares, :position_value,
+                          :market_regime, :mtf_alignment
                    WHERE NOT EXISTS (
                        SELECT 1 FROM paper_trades
                        WHERE symbol = :symbol AND strategy = :strategy AND status = 'open'

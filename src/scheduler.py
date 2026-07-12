@@ -28,7 +28,7 @@ import threading
 import time
 from datetime import datetime, time as dt_time, timezone
 
-from src import news_refresher, paper_trader, post_close
+from src import mtf_bias, news_refresher, paper_trader, post_close
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +156,8 @@ class AutonomousScheduler:
             # inside the client; a no-op when FINNHUB_KEY is absent)
             if self.finnhub is not None:
                 self._safe(lambda: news_refresher.tick(self.db, self.finnhub), "news-refresh")
+            # Lane 4: market-bias panel (TTL ~12h inside; cheap when fresh)
+            self._safe(lambda: mtf_bias.refresh_panel(self.db), "bias-panel")
         self.last_monitor_at = datetime.now(timezone.utc).isoformat()
         if live_closed or summary.get("wins") or summary.get("losses") or summary.get("expired"):
             logger.info("Monitor: live_closed=%s replay=%s", live_closed, summary)

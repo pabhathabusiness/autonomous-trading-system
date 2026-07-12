@@ -228,6 +228,8 @@ class Database:
                 ("num_edges", "INTEGER"),
                 ("edges_fired", "TEXT"),
                 ("strategy", "TEXT"),
+                # Lane 1.4: direction at proposal time (downside=short, else long)
+                ("direction", "TEXT"),
             ],
             "paper_trades": [
                 ("direction", "TEXT"),
@@ -252,6 +254,10 @@ class Database:
                 ("position_value", "REAL"),
                 ("r_multiple", "REAL"),
                 ("pnl_usd", "REAL"),
+                # --- Lane 1 backfills (derived post-close; close functions untouched) ---
+                ("exit_reason", "TEXT"),   # stop | target | timeout | unknown
+                ("mae_r", "REAL"),         # max adverse excursion, in R
+                ("mfe_r", "REAL"),         # max favorable excursion, in R
             ],
         }
         for table, cols in migrations.items():
@@ -366,18 +372,23 @@ class Database:
     def insert_proposal(self, data: dict[str, Any]) -> int:
         data = {**data, "created_at": data.get("created_at", _now()),
                 "strategy": data.get("strategy", "swing")}
+        # Lane 1.4: proposals carry direction at write time. Downside proposals
+        # already pass direction='short'; every other strategy is a long. (The
+        # 284 pre-existing rows were backfilled 2026-07-11 via the paper_trades
+        # JOIN + this same strategy rule, proven conflict-free first.)
+        data.setdefault("direction", "short" if data["strategy"] == "downside" else "long")
         with self._conn() as conn:
             cur = conn.execute(
                 """INSERT INTO proposals
                    (created_at, account_type, symbol, sector_name, entry_price,
                     stop_loss, target_price, risk_reward, quality_score,
-                    confidence, num_edges, edges_fired, strategy,
+                    confidence, num_edges, edges_fired, strategy, direction,
                     position_size_usd, shares, risk_amount, expected_return_pct,
                     expected_timeframe, reasoning, status)
                    VALUES (:created_at, :account_type, :symbol, :sector_name,
                            :entry_price, :stop_loss, :target_price, :risk_reward,
                            :quality_score, :confidence, :num_edges, :edges_fired,
-                           :strategy, :position_size_usd, :shares, :risk_amount,
+                           :strategy, :direction, :position_size_usd, :shares, :risk_amount,
                            :expected_return_pct, :expected_timeframe, :reasoning,
                            'pending')""",
                 {"created_at": _now(), **data},
@@ -385,6 +396,9 @@ class Database:
             return cur.lastrowid
 
     def get_proposals(self, status: Optional[str] = None, account_type: Optional[str] = None) -> list[dict[str, Any]]:
+        # proposals.direction is authoritative as of 2026-07-11 (Lane 1.4): written
+        # at insert time for new rows, backfilled for all 284 older rows. No
+        # paper_trades JOIN is needed to recover direction anymore.
         query = "SELECT * FROM proposals"
         clauses, params = [], []
         if status:

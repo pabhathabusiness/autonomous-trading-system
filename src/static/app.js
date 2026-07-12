@@ -1249,6 +1249,7 @@ function scSetLane(lane) {
 
 function renderScCards() {
   const wrap = $("sc-cards");
+  if ($("sc-thesis")) $("sc-thesis").textContent = SC_THESIS[scLane] || "";   // thesis on load, not just on tab-click
   const all = scCache.triggers || [];
   const rows = scLane === "all" ? all : all.filter(t => t.lane === scLane);
   rows.sort((a, b) => (b.score || 0) - (a.score || 0));

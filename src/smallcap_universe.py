@@ -89,9 +89,38 @@ def catalyst_from_news(news: Optional[list[dict[str, Any]]], now_ts: float,
     return best
 
 
+def _support_context(df: pd.DataFrame, price: float) -> dict[str, Any]:
+    """Lane-2 'at a real level' + level quality: proximity to the 200d SMA or to a
+    swing low that has held >= 2x (tested support), from daily bars alone."""
+    close, low = df["Close"], df["Low"]
+    out = {"dist_to_sma200_pct": None, "near_sma200": False, "tested_swing_low": False,
+           "swing_low_touches": 0, "level_quality": 0.0, "at_real_level": False}
+    if len(close) >= 200:
+        sma200 = float(close.rolling(200).mean().iloc[-1])
+        if sma200 > 0:
+            d = (price - sma200) / sma200 * 100
+            out["dist_to_sma200_pct"] = round(d, 1)
+            out["near_sma200"] = abs(d) <= 3
+    # swing lows over the last 80 sessions (local minima, +/-3 bar window)
+    win = low.iloc[-80:].tolist()
+    swings = [win[i] for i in range(3, len(win) - 3) if win[i] == min(win[i - 3:i + 4])]
+    near = [s for s in swings if price > 0 and abs(s - price) / price <= 0.03]
+    out["swing_low_touches"] = len(near)
+    out["tested_swing_low"] = len(near) >= 2
+    q = 0.0
+    if out["near_sma200"]:
+        q = max(q, 0.6)
+    if out["tested_swing_low"]:
+        q = max(q, 0.8 if len(near) >= 3 else 0.65)
+    out["level_quality"] = round(q, 2)
+    out["at_real_level"] = bool(out["near_sma200"] or out["tested_swing_low"])
+    return out
+
+
 def demand_trend_features(df: pd.DataFrame) -> dict[str, Any]:
-    """OHLC inputs the lane rubrics need (SMA20/50 + slope, %off-60d-high,
-    selling exhaustion, undercut-reclaim, recent-runner, prior-day close)."""
+    """OHLC inputs the lane rubrics need (SMA20/50/200 + slope, %off-60d-high,
+    selling exhaustion, undercut-reclaim, recent-runner, prior-day close, and
+    Lane-2 support-level context)."""
     if df is None or len(df) < 60 or "Open" not in df:
         return {}
     close, high, low, vol, opn = df["Close"], df["High"], df["Low"], df["Volume"], df["Open"]
@@ -105,7 +134,7 @@ def demand_trend_features(df: pd.DataFrame) -> dict[str, Any]:
     prior10_low = float(low.iloc[-11:-1].min())
     rng = float(high.iloc[-1] - low.iloc[-1])
     ret10 = (c / float(close.iloc[-11]) - 1) * 100 if len(close) > 11 else None
-    return {
+    feat = {
         "sma20": round(float(sma20.iloc[-1]), 4),
         "sma50": round(float(sma50.iloc[-1]), 4),
         "sma50_slope_up": bool(sma50.iloc[-1] > sma50.iloc[-6]),
@@ -121,6 +150,8 @@ def demand_trend_features(df: pd.DataFrame) -> dict[str, Any]:
         "recent_runner": bool(ret10 is not None and ret10 > 50),
         "prior10_low": round(prior10_low, 4),
     }
+    feat.update(_support_context(df, c))
+    return feat
 
 
 def value_fundamentals(metric: Optional[dict[str, Any]], so_m: Optional[float]) -> dict[str, Any]:
@@ -139,6 +170,7 @@ def value_fundamentals(metric: Optional[dict[str, Any]], so_m: Optional[float]) 
         "operCashFlowPerShareTTM": metric.get("cashFlowPerShareTTM"),
         "cashPerShareQuarterly": metric.get("cashPerSharePerShareQuarterly"),
         "debtToEquity": metric.get("totalDebt/totalEquityQuarterly") or metric.get("longTermDebt/equityQuarterly"),
+        "psTTM": metric.get("psTTM") or metric.get("psAnnual"),   # valuation vs sector peers
     }
 
 
@@ -181,7 +213,7 @@ def enrich_symbol(db: Database, fh: FinnhubClient, symbol: str,
     import yfinance as yf
     if df is None:
         tk = yf.Ticker(symbol)
-        df = tk.history(period="9mo", interval="1d", auto_adjust=True)
+        df = tk.history(period="15mo", interval="1d", auto_adjust=True)   # >200 bars for sma200
         splits = tk.splits if splits is None else splits
 
     sig = ss.compute_ohlc_signals(df)
@@ -268,7 +300,7 @@ def build_universe(db: Database, fh: FinnhubClient, *, symbols: Optional[list[st
     for i in range(0, len(cands), batch):
         chunk = cands[i:i + batch]
         try:
-            data = yf.download(chunk, period="9mo", interval="1d", auto_adjust=True,
+            data = yf.download(chunk, period="15mo", interval="1d", auto_adjust=True,
                                group_by="ticker", threads=True, progress=False)
         except Exception as exc:
             logger.debug("batch download failed: %s", exc)

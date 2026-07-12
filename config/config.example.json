@@ -47,6 +47,17 @@
     "bands": {"day_trade": true, "short_term": true, "swing": true},
     "note": "auto_execute stays FALSE until you deliberately enable it on the server. Only 'algo' (paper) may ever be listed here; real-money accounts are hard-blocked by execution_guard."
   },
+  "risk": {
+    "max_open_risk_pct": 5.0,
+    "daily_loss_limit_pct": -2.0,
+    "drawdown_kill_pct": -10.0,
+    "per_lane_cap_pct": 30.0,
+    "max_positions_per_sector": 3,
+    "liquidity_max_adv_participation_pct": 1.0,
+    "liquidity_min_price": 0.20,
+    "liquidity_min_dollar_vol": 300000,
+    "note": "Portfolio-level risk gate for Alpaca PAPER order placement (B3). Every control fails CLOSED: a missing input REFUSES the trade. max_open_risk = sum of open+pending position risk as pct of equity; daily_loss halts new opens at -2% of day-start equity; drawdown_kill halts ALL opens at -10% below the equity high-water mark (persists across restart); per_lane_cap = max open notional per lane as pct of equity; max_positions_per_sector is the correlation cap; liquidity guard bounds order size vs ADV and floors price/dollar-volume."
+  },
   "smallcap": {
     "enabled": false,
     "notional": {"runner": 2500, "bounce": 3000, "value": 4000, "hailmary": 1500},
@@ -137,11 +148,13 @@
   "alpaca": {
     "enabled": false,
     "paper_only": true,
+    "auto_place": false,
     "alpaca_key": "YOUR_ALPACA_KEY_ID",
     "alpaca_secret": "YOUR_ALPACA_SECRET_KEY",
     "data_url": "https://data.alpaca.markets",
     "paper_url": "https://paper-api.alpaca.markets",
-    "feed": "iex"
+    "feed": "iex",
+    "note": "auto_place is the master switch for placing REAL Alpaca PAPER bracket orders from the scheduler. Stays FALSE until the B3 risk controls are verified live. paper_only + execution_guard wall every order to the paper host regardless."
   },
   "database": {
     "path": "data/trading_system.db"

@@ -32,6 +32,7 @@ from src import market_overview as market_overview_module
 from src import mtf_bias
 from src import news_refresher
 from src import smallcap_scan
+from src import risk_state
 from src.finnhub_client import FinnhubClient
 from src import paper_trader
 from src.scheduler import AutonomousScheduler
@@ -987,8 +988,52 @@ def smallcap_record(lane: Optional[str] = None, status: Optional[str] = None) ->
 @app.post("/api/smallcap/scan")
 def smallcap_scan_now() -> dict[str, Any]:
     """Manual fast lane scan over the CURRENT universe (opens paper triggers).
-    Does not rebuild the universe -- use /refresh for that."""
+    Does not rebuild the universe -- use /refresh for that. Manual scans never
+    auto-place (alpaca/risk_mgr not passed) regardless of the auto_place flag."""
     return smallcap_scan.scan_and_open(DB, FINNHUB, CONFIG, open_trades=True)
+
+
+@app.get("/api/risk/status")
+def risk_status() -> dict[str, Any]:
+    """B3 risk-utilization panel: halt state + kill-switch metrics + open-exposure
+    utilization vs the caps. Read-only; the gate that USES these fires in the
+    order path. auto_place tells you whether the order path is armed."""
+    acct = "algo"
+    r = (CONFIG.get("risk") or {})
+    try:
+        equity = ALPACA.account_equity() if getattr(ALPACA, "enabled", False) else None
+    except Exception:
+        equity = None
+    st = risk_state.status(DB, acct, equity, CONFIG)
+    open_risk = DB.sum_open_risk(acct)
+    sector_counts = DB.count_open_by_sector(acct)
+    lane_notional = DB.open_notional_by_lane(acct)
+    max_open = float(r.get("max_open_risk_pct", 5.0))
+    lane_cap = float(r.get("per_lane_cap_pct", 30.0))
+    return {
+        "account_type": acct,
+        "auto_place": SCHEDULER.auto_place,
+        "alpaca_enabled": getattr(ALPACA, "enabled", False),
+        "risk_state": st,
+        "open_risk_usd": round(open_risk, 2),
+        "open_risk_pct": round(open_risk / equity * 100, 2) if equity else None,
+        "max_open_risk_pct": max_open,
+        "sector_counts": sector_counts,
+        "max_positions_per_sector": int(r.get("max_positions_per_sector", 3)),
+        "lane_notional": {k: round(v, 2) for k, v in lane_notional.items()},
+        "lane_notional_pct": ({k: round(v / equity * 100, 1) for k, v in lane_notional.items()}
+                              if equity else {}),
+        "per_lane_cap_pct": lane_cap,
+        "limits": r,
+    }
+
+
+@app.get("/api/sim_vs_real")
+def sim_vs_real(limit: int = 30) -> dict[str, Any]:
+    """B1 sim-vs-real: the first real Alpaca fills with the SIM numbers beside the
+    REAL numbers -- how much the internal simulation was lying."""
+    rows = DB.get_sim_vs_real(limit=limit)
+    return {"count": len(rows), "trades": rows}
 
 
 @app.post("/api/smallcap/refresh")

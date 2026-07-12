@@ -23,7 +23,7 @@ from typing import Any, Optional
 import pandas as pd
 import requests
 
-from src import execution_guard
+from src import execution_guard, risk_gate
 
 logger = logging.getLogger(__name__)
 
@@ -184,21 +184,32 @@ class AlpacaClient:
 
     def submit_bracket_order(self, *, symbol: str, qty: int, side: str,
                              entry_price: float, stop_price: float, target_price: float,
-                             account_type: str, time_in_force: str = "day",
+                             account_type: str, risk_decision: Any,
+                             client_order_id: Optional[str] = None,
+                             time_in_force: str = "day",
                              order_type: str = "limit") -> dict[str, Any]:
         """Submit a broker-managed BRACKET order (entry + attached stop-loss +
         take-profit) on the Alpaca PAPER account. Alpaca manages the exits
         server-side, so a position closes at its level even if our monitor loop
         hiccups.
 
-        THE WALL: every call first passes `execution_guard.assert_paper_execution`,
-        which fails closed unless the account is a paper book AND the endpoint is
-        the Alpaca paper host. A real-money account can never reach order
-        submission through this method.
+        THREE FAIL-CLOSED GATES run before any POST, and this method is the SOLE
+        caller of the order POST, so no caller can bypass them:
+          1. execution_guard.assert_paper_execution -- paper book + paper host.
+          2. risk_gate.assert_trade_allowed -- an APPROVED RiskDecision bound to
+             this exact symbol+qty (the 7 B3 controls). REQUIRED, never optional.
+          3. `assert 'paper-api' in self.paper_url` -- literal paper-host guard,
+             belt-and-suspenders to gate 1. NEVER REMOVE THIS ASSERT.
+        `client_order_id` is a deterministic idempotency key so a retry after a
+        POST timeout cannot create a duplicate real bracket.
         """
-        # ---- paper-vs-real wall (raises RealMoneyGuardError => no order) ----
+        # ---- GATE 1: paper-vs-real wall (raises RealMoneyGuardError => no order) ----
         execution_guard.assert_paper_execution(
             account_type=account_type, endpoint_url=self.paper_url, config=self._config)
+
+        # ---- GATE 2: risk gate (raises RiskGateError => no order). Enforced HERE,
+        #      the single order chokepoint, so the 7 controls can't be bypassed. ----
+        risk_gate.assert_trade_allowed(risk_decision, symbol=symbol, qty=int(qty))
 
         if not self.enabled:
             return {"status": "disabled", "reason": "alpaca not enabled (no keys)"}
@@ -215,4 +226,33 @@ class AlpacaClient:
         }
         if order_type == "limit":
             body["limit_price"] = round(float(entry_price), 2)
+        if client_order_id:
+            body["client_order_id"] = client_order_id     # idempotency (dedupes retries)
+
+        # ---- GATE 3: literal paper-host assertion, immediately before the POST.
+        #      NEVER REMOVE. Guards against a config/variable drift that would
+        #      point the POST at a non-paper host after gate 1 validated paper_url.
+        assert "paper-api" in self.paper_url, (
+            f"REFUSING TO TRADE: paper_url '{self.paper_url}' is not the Alpaca paper host")
         return self._post(f"{self.paper_url}/v2/orders", body) or {"error": "no response"}
+
+    def get_order(self, order_id: str) -> Optional[dict[str, Any]]:
+        """Fetch a placed order (for fill reconciliation). Read-only, paper host."""
+        if not self.enabled:
+            return None
+        return self._get(f"{self.paper_url}/v2/orders/{order_id}", {})
+
+    def account_equity(self) -> Optional[float]:
+        """Current paper-account equity for position sizing / risk state. None if
+        the read fails -- callers must treat None as 'do not trade' (fail closed)."""
+        acct = self.account()
+        if not acct:
+            return None
+        for k in ("equity", "portfolio_value", "last_equity", "cash"):
+            v = acct.get(k)
+            if v is not None:
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    continue
+        return None

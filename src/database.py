@@ -262,6 +262,57 @@ CREATE TABLE IF NOT EXISTS smallcap_deathwatch (
     added_at TEXT NOT NULL,
     last_checked TEXT
 );
+
+-- B3 risk state: one row per account. Drives the daily-loss halt (-2% of
+-- day-start equity) and the drawdown kill-switch (-10% below equity HWM).
+-- Persisted so a crash-restart cannot resume trading while halted.
+CREATE TABLE IF NOT EXISTS risk_state (
+    account_type TEXT PRIMARY KEY,
+    equity_high_water_mark REAL,
+    day_key TEXT,                 -- YYYY-MM-DD (ET) baseline for the daily-loss line
+    day_start_equity REAL,
+    realized_pnl_today REAL DEFAULT 0,
+    halted INTEGER DEFAULT 0,     -- 0/1 global halt for this account
+    halt_reason TEXT,             -- daily_loss | drawdown | manual
+    halted_at TEXT,
+    updated_at TEXT
+);
+
+-- B1 fill event log: partial fills / rejects / cancels captured as discrete
+-- events. The paper_trades columns carry the summary; this is the audit trail.
+CREATE TABLE IF NOT EXISTS order_fills (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_id INTEGER,             -- FK -> paper_trades.id
+    broker_order_id TEXT,
+    leg TEXT,                     -- entry | stop | target
+    event_type TEXT,              -- submitted | accepted | partial_fill | fill | reject | cancel
+    qty REAL,
+    price REAL,
+    ts TEXT,
+    raw_json TEXT
+);
+
+-- B1 sim-vs-real: real fills with the SIM numbers beside the REAL numbers, so
+-- we can measure how much the internal simulation was lying over the first ~30
+-- real trades. (The paper_trades row keeps sim pnl/return/R untouched; the
+-- real_* columns hold the broker-fill truth.)
+CREATE VIEW IF NOT EXISTS sim_vs_real AS
+SELECT id, symbol, lane, book, account_type, entry_date, exit_date, status,
+       submitted_at, is_real,
+       entry_price   AS sim_entry,
+       fill_price    AS real_entry,
+       slippage_bps,
+       exit_price    AS sim_exit,
+       exit_fill_price AS real_exit,
+       exit_slippage_bps,
+       pnl_usd       AS sim_pnl_usd,     real_pnl_usd,
+       return_pct    AS sim_return_pct,  real_return_pct,
+       r_multiple    AS sim_r_multiple,  real_r_multiple,
+       was_rejected, partial_fill, gap_through_stop,
+       time_to_fill, exit_time_to_fill
+FROM paper_trades
+WHERE is_real = 1
+ORDER BY submitted_at DESC;
 """
 
 
@@ -358,6 +409,26 @@ class Database:
                 ("hold_band", "TEXT"),         # overnight | short | medium | position
                 ("gap_pct", "REAL"),           # overnight band: (next open - prior close)/prior close
                 ("hit_time_stop", "INTEGER"),  # band time-stop auto-close flag
+                # --- B1: Alpaca paper order placement + FILL recording ---
+                ("broker_order_id", "TEXT"),   # Alpaca bracket PARENT order id
+                ("client_order_id", "TEXT"),   # deterministic idempotency key (dedupes retries)
+                ("order_status", "TEXT"),       # submitted|accepted|partially_filled|filled|rejected|canceled
+                ("submitted_at", "TEXT"),       # ISO ts the order was POSTed
+                ("fill_price", "REAL"),         # actual avg entry fill (vs planned entry_price)
+                ("filled_qty", "REAL"),         # shares actually filled
+                ("slippage_bps", "REAL"),       # signed (fill-entry)/entry*1e4
+                ("was_rejected", "INTEGER"),    # 0/1 broker rejected/errored
+                ("partial_fill", "INTEGER"),    # 0/1 filled_qty < requested
+                ("gap_through_stop", "INTEGER"),# 0/1 exit filled materially worse than stop
+                ("time_to_fill", "REAL"),       # seconds submitted_at -> entry fill
+                ("exit_fill_price", "REAL"),    # actual avg exit fill
+                ("exit_slippage_bps", "REAL"),  # signed exit-side slippage vs planned level
+                ("exit_time_to_fill", "REAL"),  # seconds to the exit fill
+                # --- B1: real vs sim (sim numbers stay in pnl_usd/return_pct/r_multiple) ---
+                ("is_real", "INTEGER"),         # 1 = backed by a real Alpaca fill, 0/NULL = pure sim
+                ("real_pnl_usd", "REAL"),       # realized $ from real fills
+                ("real_return_pct", "REAL"),    # realized % from real fills
+                ("real_r_multiple", "REAL"),    # realized R from real fills
             ],
             # Addendum 3: small-cap universe gains price tier + SO-proxy float estimate
             "smallcap_universe": [
@@ -1087,4 +1158,138 @@ class Database:
         params.append(limit)
         with self._conn() as conn:
             rows = conn.execute(query, params).fetchall()
+            return [dict(r) for r in rows]
+
+    # ============================================================ B3 risk state
+    def get_risk_state(self, account_type: str) -> Optional[dict[str, Any]]:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM risk_state WHERE account_type = ?",
+                               (account_type,)).fetchone()
+            return dict(row) if row else None
+
+    def upsert_risk_state(self, account_type: str, **fields: Any) -> None:
+        """Additive upsert -- pass only the columns that changed."""
+        allowed = {"equity_high_water_mark", "day_key", "day_start_equity",
+                   "realized_pnl_today", "halted", "halt_reason", "halted_at"}
+        sets = {k: v for k, v in fields.items() if k in allowed}
+        sets["updated_at"] = _now()
+        cols = ", ".join(sets)
+        placeholders = ", ".join(f":{k}" for k in sets)
+        updates = ", ".join(f"{k}=excluded.{k}" for k in sets)
+        params = dict(sets, account_type=account_type)
+        with self._conn() as conn:
+            conn.execute(
+                f"""INSERT INTO risk_state (account_type, {cols})
+                    VALUES (:account_type, {placeholders})
+                    ON CONFLICT(account_type) DO UPDATE SET {updates}""", params)
+
+    # -------------------------------------------- open REAL exposure aggregations
+    # These count only rows that represent live-or-working REAL Alpaca exposure
+    # (is_real=1, status='open', not rejected). A row is inserted at SUBMISSION
+    # time (before fill), so successive gate evaluations in one scan see prior
+    # submissions and cannot blow through the caps before fills settle.
+    _OPEN_REAL = ("account_type = ? AND is_real = 1 AND status = 'open' "
+                  "AND COALESCE(was_rejected, 0) = 0")
+
+    def sum_open_risk(self, account_type: str = "algo") -> float:
+        """Sum of |entry-stop| * shares over open+working real positions."""
+        with self._conn() as conn:
+            row = conn.execute(
+                f"""SELECT COALESCE(SUM(ABS(entry_price - stop_loss)
+                        * COALESCE(filled_qty, shares, 0)), 0)
+                    FROM paper_trades WHERE {self._OPEN_REAL}""",
+                (account_type,)).fetchone()
+            return float(row[0] or 0.0)
+
+    def count_open_by_sector(self, account_type: str = "algo") -> dict[str, int]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"""SELECT COALESCE(sector_name, 'Unknown') AS s, COUNT(*) AS n
+                    FROM paper_trades WHERE {self._OPEN_REAL} GROUP BY s""",
+                (account_type,)).fetchall()
+            return {r["s"]: int(r["n"]) for r in rows}
+
+    def open_notional_by_lane(self, account_type: str = "algo") -> dict[str, float]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"""SELECT COALESCE(lane, 'none') AS l,
+                           COALESCE(SUM(COALESCE(filled_qty, shares, 0) * entry_price), 0) AS notional
+                    FROM paper_trades WHERE {self._OPEN_REAL} GROUP BY l""",
+                (account_type,)).fetchall()
+            return {r["l"]: float(r["notional"]) for r in rows}
+
+    # -------------------------------------------------------------- B1 fills log
+    def insert_algo_trade(self, trade: dict[str, Any]) -> int:
+        """Insert a book='algo' paper_trades row for a REAL Alpaca paper order at
+        SUBMISSION time (before fill). Returns the new trade id. entry_price /
+        stop_loss / target_price / symbol / entry_date must be present (NOT NULL)."""
+        cols = ("proposal_id", "symbol", "account_type", "strategy", "direction",
+                "sector_name", "entry_price", "stop_loss", "target_price",
+                "expected_timeframe", "entry_date", "max_hold_days", "status", "book",
+                "source", "lane", "lane_score", "composite_score", "price_tier",
+                "hold_band", "shares", "position_value", "trigger_json",
+                "broker_order_id", "client_order_id", "order_status", "submitted_at",
+                "is_real", "filled_qty", "fill_price", "slippage_bps", "was_rejected",
+                "partial_fill", "time_to_fill")
+        data = {c: trade.get(c) for c in cols}
+        data["status"] = data.get("status") or "open"
+        data["book"] = data.get("book") or "algo"
+        data["is_real"] = 1 if data.get("is_real") in (1, True) else data.get("is_real")
+        data["entry_date"] = data.get("entry_date") or _now()
+        collist = ", ".join(cols)
+        placeholders = ", ".join(f":{c}" for c in cols)
+        with self._conn() as conn:
+            cur = conn.execute(
+                f"INSERT INTO paper_trades ({collist}) VALUES ({placeholders})", data)
+            return int(cur.lastrowid)
+
+    def record_open_fill(self, trade_id: int, **fill: Any) -> None:
+        allowed = {"broker_order_id", "client_order_id", "order_status", "submitted_at",
+                   "fill_price", "filled_qty", "slippage_bps", "was_rejected",
+                   "partial_fill", "time_to_fill", "is_real"}
+        sets = {k: v for k, v in fill.items() if k in allowed}
+        if not sets:
+            return
+        assignments = ", ".join(f"{k} = :{k}" for k in sets)
+        with self._conn() as conn:
+            conn.execute(f"UPDATE paper_trades SET {assignments} WHERE id = :tid",
+                         dict(sets, tid=trade_id))
+
+    def record_exit_fill(self, trade_id: int, **fill: Any) -> None:
+        allowed = {"exit_fill_price", "exit_slippage_bps", "exit_time_to_fill",
+                   "gap_through_stop", "real_pnl_usd", "real_return_pct",
+                   "real_r_multiple", "order_status"}
+        sets = {k: v for k, v in fill.items() if k in allowed}
+        if not sets:
+            return
+        assignments = ", ".join(f"{k} = :{k}" for k in sets)
+        with self._conn() as conn:
+            conn.execute(f"UPDATE paper_trades SET {assignments} WHERE id = :tid",
+                         dict(sets, tid=trade_id))
+
+    def insert_order_fill(self, *, trade_id: Optional[int], broker_order_id: Optional[str],
+                          leg: str, event_type: str, qty: Optional[float] = None,
+                          price: Optional[float] = None, raw_json: Optional[str] = None) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO order_fills (trade_id, broker_order_id, leg, event_type,
+                        qty, price, ts, raw_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (trade_id, broker_order_id, leg, event_type, qty, price, _now(), raw_json))
+
+    def find_algo_trade_by_client_order_id(self, client_order_id: str) -> Optional[dict[str, Any]]:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM paper_trades WHERE client_order_id = ?",
+                               (client_order_id,)).fetchone()
+            return dict(row) if row else None
+
+    def get_open_algo_trades(self, account_type: str = "algo") -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM paper_trades WHERE {self._OPEN_REAL}", (account_type,)).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_sim_vs_real(self, limit: int = 30) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute("SELECT * FROM sim_vs_real LIMIT ?", (limit,)).fetchall()
             return [dict(r) for r in rows]

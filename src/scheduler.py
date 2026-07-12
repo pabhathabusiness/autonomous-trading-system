@@ -29,8 +29,12 @@ import time
 from datetime import datetime, time as dt_time, timezone
 
 from src import mtf_bias, news_refresher, paper_trader, post_close, smallcap_scan
+from src import order_executor, risk_state
+from src.risk_manager import RiskManager
 
 logger = logging.getLogger(__name__)
+
+ALGO_ACCOUNT = "algo"
 
 
 def _now_et():
@@ -99,6 +103,10 @@ class AutonomousScheduler:
         self.monitor_interval = max(15, ac.get("monitor_interval_sec", 60))
         self.market_hours_only = ac.get("market_hours_only", True)
         self.auto_execute = ac.get("auto_execute", False)
+        # B1: master switch for placing REAL Alpaca PAPER orders. Default OFF --
+        # the order path is dark until deliberately enabled on the server.
+        self.auto_place = bool((config.get("alpaca") or {}).get("auto_place", False))
+        self.risk_mgr = RiskManager(config) if config.get("accounts") else None
         # Addendum 2: quarantined small-cap lane. OFF by default -> deploy is safe
         # (no 5000-name yfinance build until deliberately enabled).
         self.smallcap_enabled = (config.get("smallcap", {}) or {}).get("enabled", False)
@@ -120,8 +128,9 @@ class AutonomousScheduler:
             return
         self._thread = threading.Thread(target=self._run, name="autoscheduler", daemon=True)
         self._thread.start()
-        logger.info("Autonomous scheduler STARTED (scan/%ss monitor/%ss market_hours_only=%s auto_execute=%s)",
-                    self.scan_interval, self.monitor_interval, self.market_hours_only, self.auto_execute)
+        logger.info("Autonomous scheduler STARTED (scan/%ss monitor/%ss market_hours_only=%s "
+                    "auto_execute=%s auto_place=%s)", self.scan_interval, self.monitor_interval,
+                    self.market_hours_only, self.auto_execute, self.auto_place)
 
     def stop(self) -> None:
         self._stop.set()
@@ -131,6 +140,8 @@ class AutonomousScheduler:
             "enabled": self.enabled,
             "running": bool(self._thread and self._thread.is_alive()),
             "auto_execute": self.auto_execute,
+            "auto_place": self.auto_place,
+            "algo_halted": risk_state.is_halted(self.db, ALGO_ACCOUNT),
             "market_open": market_is_open(),
             "scan_interval_sec": self.scan_interval,
             "monitor_interval_sec": self.monitor_interval,
@@ -165,6 +176,19 @@ class AutonomousScheduler:
                 self._safe(lambda: news_refresher.tick(self.db, self.finnhub), "news-refresh")
             # Lane 4: market-bias panel (TTL ~12h inside; cheap when fresh)
             self._safe(lambda: mtf_bias.refresh_panel(self.db), "bias-panel")
+            # B1/B3: reconcile any real Alpaca entry fills + refresh the risk state
+            # (equity high-water mark, day baseline, daily-loss/drawdown halts). Runs
+            # whenever Alpaca is live -- a no-op when there are no real algo trades,
+            # and independent of auto_place so the kill-switch stays current.
+            if self.alpaca is not None and getattr(self.alpaca, "enabled", False):
+                self._safe(lambda: order_executor.reconcile_open_fills(self.db, self.alpaca),
+                           "algo-reconcile")
+                try:
+                    eq = self.alpaca.account_equity()
+                except Exception:
+                    eq = None                    # fail safe: None => refresh is a no-op
+                self._safe(lambda: risk_state.refresh(self.db, ALGO_ACCOUNT, eq, self.config),
+                           "risk-state")
         self.last_monitor_at = datetime.now(timezone.utc).isoformat()
         if live_closed or summary.get("wins") or summary.get("losses") or summary.get("expired"):
             logger.info("Monitor: live_closed=%s replay=%s", live_closed, summary)
@@ -189,8 +213,10 @@ class AutonomousScheduler:
             self._sc_refreshing = True
             threading.Thread(target=self._smallcap_refresh, name="sc-universe", daemon=True).start()
         # scan_and_open reads the universe rows (fast); safe alongside a bg refresh
-        # thanks to the 15s SQLite busy_timeout
-        smallcap_scan.scan_and_open(self.db, self.finnhub, self.config, open_trades=True)
+        # thanks to the 15s SQLite busy_timeout. alpaca+risk_mgr enable the real
+        # order path ONLY when config.alpaca.auto_place is on (default OFF).
+        smallcap_scan.scan_and_open(self.db, self.finnhub, self.config, open_trades=True,
+                                    alpaca=self.alpaca, risk_mgr=self.risk_mgr)
 
     def _smallcap_refresh(self) -> None:
         try:

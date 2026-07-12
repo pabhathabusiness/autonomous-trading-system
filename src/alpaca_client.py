@@ -237,10 +237,27 @@ class AlpacaClient:
         return self._post(f"{self.paper_url}/v2/orders", body) or {"error": "no response"}
 
     def get_order(self, order_id: str) -> Optional[dict[str, Any]]:
-        """Fetch a placed order (for fill reconciliation). Read-only, paper host."""
+        """Fetch a placed order WITH its bracket legs (for fill reconciliation).
+        Read-only, paper host. nested=true returns the stop/target child orders."""
         if not self.enabled:
             return None
-        return self._get(f"{self.paper_url}/v2/orders/{order_id}", {})
+        return self._get(f"{self.paper_url}/v2/orders/{order_id}", {"nested": "true"})
+
+    def get_order_by_client_id(self, client_order_id: str) -> Optional[dict[str, Any]]:
+        """Find an order by our deterministic client_order_id -- used to detect a
+        POST-timeout ORPHAN (Alpaca accepted the bracket but our _post timed out).
+        Lists recent orders (status=all, nested legs) and matches client-side so we
+        don't depend on a single-order-by-client-id endpoint."""
+        if not self.enabled:
+            return None
+        data = self._get(f"{self.paper_url}/v2/orders",
+                         {"status": "all", "limit": 200, "nested": "true"})
+        if not isinstance(data, list):
+            return None
+        for o in data:
+            if o.get("client_order_id") == client_order_id:
+                return o
+        return None
 
     def account_equity(self) -> Optional[float]:
         """Current paper-account equity for position sizing / risk state. None if

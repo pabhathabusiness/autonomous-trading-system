@@ -53,11 +53,15 @@ def fresh_db():
 
 class FakeAlpaca:
     """Mimics the real client's contract INCLUDING the fail-closed chokepoint."""
-    def __init__(self, equity, config, fills=None):
+    def __init__(self, equity, config, fills=None, by_client=None, raise_on_submit=False,
+                 reject_on_submit=False):
         self._equity, self._config = equity, config
         self.paper_url = "https://paper-api.alpaca.markets"
         self.enabled = True
         self._fills = fills or {}
+        self._by_client = by_client or {}
+        self._raise = raise_on_submit
+        self._reject = reject_on_submit
         self.placed = []
 
     def account_equity(self):
@@ -70,10 +74,17 @@ class FakeAlpaca:
             account_type=account_type, endpoint_url=self.paper_url, config=self._config)
         risk_gate.assert_trade_allowed(risk_decision, symbol=symbol, qty=int(qty))
         self.placed.append(symbol)
+        if self._raise:
+            raise RuntimeError("simulated transport error after POST")
+        if self._reject:
+            return {"error": "504 gateway timeout", "status_code": 504}
         return {"id": f"ord-{symbol}", "status": "accepted", "client_order_id": client_order_id}
 
     def get_order(self, oid):
         return self._fills.get(oid)
+
+    def get_order_by_client_id(self, coid):
+        return self._by_client.get(coid)
 
 
 def _raises(exc, fn, *a, **k):
@@ -380,7 +391,7 @@ def test_executor_within_batch_sector_cap():
         _rm(path)
 
 
-def test_executor_reconcile_open_fills():
+def test_executor_reconcile_entry_fill():
     db, path = fresh_db()
     try:
         cfg = make_config()
@@ -390,10 +401,71 @@ def test_executor_reconcile_open_fills():
         alp = FakeAlpaca(100000, cfg, fills=fills)
         rm = RiskManager(cfg)
         order_executor.execute_candidates(db, alp, rm, cfg, [_candidate("AAA")])
-        n = order_executor.reconcile_open_fills(db, alp)
-        assert n == 1
+        res = order_executor.reconcile_open_fills(db, alp)
+        assert res["entry"] == 1
         row = db.get_open_algo_trades("algo")[0]
         assert row["fill_price"] == 3.02 and row["filled_qty"] == 300.0
+    finally:
+        _rm(path)
+
+
+def test_reconcile_exit_leg_closes_with_real_and_sim():
+    db, path = fresh_db()
+    try:
+        cfg = make_config()
+        alp = FakeAlpaca(100000, cfg)
+        rm = RiskManager(cfg)
+        order_executor.execute_candidates(db, alp, rm, cfg, [_candidate("AAA")])
+        n = int(db.get_open_algo_trades("algo")[0]["shares"])   # actual sized shares
+        # parent entry filled @3.02 (full n); stop leg filled @2.68 (gap through 2.70)
+        alp._fills = {"ord-AAA": {"id": "ord-AAA", "status": "filled", "filled_qty": str(n),
+                                  "filled_avg_price": "3.02", "submitted_at": "2026-07-12T14:30:00Z",
+                                  "filled_at": "2026-07-12T14:30:01Z",
+                                  "legs": [{"id": "leg-stop", "order_type": "stop", "status": "filled",
+                                            "filled_avg_price": "2.68", "stop_price": "2.70",
+                                            "filled_at": "2026-07-12T15:00:00Z"},
+                                           {"id": "leg-tp", "type": "limit", "status": "canceled",
+                                            "limit_price": "3.60"}]}}
+        res = order_executor.reconcile_open_fills(db, alp)
+        assert res["entry"] == 1 and res["exit"] == 1, res
+        assert not db.get_open_algo_trades("algo")            # closed, no longer open
+        row = db.get_sim_vs_real(30)[0]
+        assert row["status"] == "closed"
+        assert row["real_entry"] == 3.02 and row["real_exit"] == 2.68
+        assert row["gap_through_stop"] == 1                   # 2.68 < 2.70 stop
+        # real fill (entry 3.02 -> exit 2.68) is WORSE than the sim plan (3.00 -> 2.70)
+        assert row["real_pnl_usd"] < row["sim_pnl_usd"] < 0, (row["real_pnl_usd"], row["sim_pnl_usd"])
+        assert row["sim_pnl_usd"] == round((2.70 - 3.00) * n, 2)
+    finally:
+        _rm(path)
+
+
+def test_orphan_recovery_on_submit_error():
+    db, path = fresh_db()
+    try:
+        cfg = make_config()
+        coid = "algo-AAA-turnaround-" + order_executor._now_et_date()
+        # submit returns an error, but Alpaca actually ACCEPTED the bracket
+        by_client = {coid: {"id": "ord-real", "status": "accepted", "client_order_id": coid}}
+        alp = FakeAlpaca(100000, cfg, by_client=by_client, reject_on_submit=True)
+        rm = RiskManager(cfg)
+        out = order_executor.execute_candidates(db, alp, rm, cfg, [_candidate("AAA")])
+        assert out["placed"] == 1, out                        # recovered, not lost
+        row = db.get_open_algo_trades("algo")[0]
+        assert row["broker_order_id"] == "ord-real" and not row["was_rejected"]
+    finally:
+        _rm(path)
+
+
+def test_submit_error_no_orphan_marks_rejected():
+    db, path = fresh_db()
+    try:
+        cfg = make_config()
+        alp = FakeAlpaca(100000, cfg, by_client={}, reject_on_submit=True)   # no orphan exists
+        rm = RiskManager(cfg)
+        out = order_executor.execute_candidates(db, alp, rm, cfg, [_candidate("AAA")])
+        assert out["errors"] == 1 and out["placed"] == 0
+        assert not db.get_open_algo_trades("algo")            # rejected -> not counted open
     finally:
         _rm(path)
 

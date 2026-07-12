@@ -141,36 +141,89 @@ def _execute_one(db, alpaca, risk_mgr, config, c: dict[str, Any],
             target_price=target, account_type=account_type, risk_decision=decision,
             client_order_id=coid)
     except Exception as exc:
-        # gate raised (should not, we pre-checked) or transport error: mark the row
-        # rejected so it stops counting toward caps, and surface it.
-        db.record_open_fill(trade_id, was_rejected=1, order_status="error")
+        # A JSON/transport error AFTER the POST may hide an order Alpaca ACCEPTED.
+        # Never assume failure -- reconcile by client_order_id before rejecting.
         logger.warning("order_executor: submit raised for %s: %s", symbol, exc)
-        return {"symbol": symbol, "outcome": "error", "reason": f"submit raised: {exc}",
-                "trade_id": trade_id}
+        return _recover_or_reject(db, alpaca, trade_id, coid, symbol, shares,
+                                  f"submit raised: {exc}")
 
     # 6. record submission result (fill metrics captured later in reconciliation)
     sub = fill_recorder.record_submission(db, trade_id, resp, planned_entry=entry)
     if sub.get("was_rejected"):
-        return {"symbol": symbol, "outcome": "error", "reason": "broker rejected/errored",
-                "resp": resp, "trade_id": trade_id}
+        # POST may have TIMED OUT after Alpaca accepted the bracket -> orphan check.
+        return _recover_or_reject(db, alpaca, trade_id, coid, symbol, shares,
+                                  "broker rejected/errored")
     return {"symbol": symbol, "outcome": "placed", "trade_id": trade_id,
             "broker_order_id": sub.get("broker_order_id"), "shares": shares,
             "risk_pct": decision.risk_pct, "notional": decision.notional}
 
 
-def reconcile_open_fills(db, alpaca, *, account_type: str = "algo") -> int:
-    """Sweep open algo trades whose entry hasn't been marked filled yet and pull
-    the broker fill (called from the monitor loop). Returns count reconciled."""
-    n = 0
+def _recover_or_reject(db, alpaca, trade_id: int, coid: str, symbol: str, shares: int,
+                       reason: str) -> dict[str, Any]:
+    """POST-timeout orphan recovery: if Alpaca actually has our order (by
+    client_order_id) and it isn't rejected, adopt it -- never leave a live
+    position marked rejected. Otherwise mark the row rejected (fail closed on
+    caps)."""
+    orphan = None
+    try:
+        orphan = alpaca.get_order_by_client_id(coid)
+    except Exception:
+        orphan = None
+    if orphan and (orphan.get("status") or "").lower() not in fill_recorder._REJECT:
+        fields = fill_recorder.parse_submission(orphan)
+        db.record_open_fill(trade_id, broker_order_id=fields.get("broker_order_id"),
+                            order_status=fields.get("order_status"), was_rejected=0)
+        db.insert_order_fill(trade_id=trade_id, broker_order_id=fields.get("broker_order_id"),
+                             leg="entry", event_type="recovered",
+                             raw_json=fill_recorder._dump(orphan))
+        logger.warning("order_executor: RECOVERED orphan %s (%s) after apparent submit failure",
+                       symbol, fields.get("broker_order_id"))
+        return {"symbol": symbol, "outcome": "placed", "trade_id": trade_id,
+                "broker_order_id": fields.get("broker_order_id"), "shares": shares,
+                "recovered_orphan": True}
+    db.record_open_fill(trade_id, was_rejected=1, order_status="error")
+    return {"symbol": symbol, "outcome": "error", "reason": reason, "trade_id": trade_id}
+
+
+def reconcile_open_fills(db, alpaca, *, account_type: str = "algo") -> dict[str, int]:
+    """Sweep open algo trades: pull the broker order (with nested bracket legs),
+    record the ENTRY fill if not yet recorded, and if an EXIT leg has filled,
+    record the real exit + close the row at real levels (sim numbers computed from
+    the plan beside them). Returns {entry, exit} counts. Called from the monitor."""
+    entry_n = exit_n = 0
     for t in db.get_open_algo_trades(account_type):
-        if t.get("fill_price") is not None or not t.get("broker_order_id"):
+        oid = t.get("broker_order_id")
+        if not oid:
             continue
-        order = alpaca.get_order(t["broker_order_id"])
+        order = alpaca.get_order(oid)               # nested=true -> includes legs
         if not order:
             continue
-        fields = fill_recorder.record_open_fill(
-            db, t["id"], order, planned_entry=t.get("entry_price"),
-            requested_qty=t.get("shares"), submitted_at=t.get("submitted_at"))
-        if fields.get("fill_price") is not None:
-            n += 1
-    return n
+        entry_fill = t.get("fill_price")
+        filled_qty = t.get("filled_qty")
+        if entry_fill is None:
+            f = fill_recorder.record_open_fill(
+                db, t["id"], order, planned_entry=t.get("entry_price"),
+                requested_qty=t.get("shares"), submitted_at=t.get("submitted_at"))
+            if f.get("fill_price") is not None:
+                entry_fill = f["fill_price"]
+                filled_qty = f.get("filled_qty", filled_qty)   # use the REAL filled qty
+                entry_n += 1
+        # real EXIT leg -> record + close (once; gate on exit_fill_price is None)
+        if entry_fill is not None and t.get("exit_fill_price") is None:
+            found = fill_recorder.find_filled_exit_leg(order)
+            if found:
+                leg, kind = found
+                planned_exit = t.get("stop_loss") if kind == "stop" else t.get("target_price")
+                direction = t.get("direction", "long")
+                exf = fill_recorder.record_exit_fill(
+                    db, t["id"], leg, planned_exit=planned_exit, stop_price=t.get("stop_loss"),
+                    direction=direction, submitted_at=t.get("submitted_at"))
+                qty = filled_qty or t.get("shares")
+                real = fill_recorder.compute_real_close(
+                    entry_fill, exf.get("exit_fill_price"), t.get("stop_loss"), qty, direction)
+                sim = fill_recorder.compute_sim_close(
+                    t.get("entry_price"), planned_exit, t.get("shares"), t.get("stop_loss"), direction)
+                db.close_algo_trade(t["id"], exit_price=planned_exit, exit_reason=kind,
+                                    outcome=("win" if kind == "target" else "loss"), **real, **sim)
+                exit_n += 1
+    return {"entry": entry_n, "exit": exit_n}

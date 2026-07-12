@@ -1289,6 +1289,21 @@ class Database:
                 f"SELECT * FROM paper_trades WHERE {self._OPEN_REAL}", (account_type,)).fetchall()
             return [dict(r) for r in rows]
 
+    def close_algo_trade(self, trade_id: int, *, exit_price: float, exit_reason: str,
+                         outcome: Optional[str] = None, **fields: Any) -> None:
+        """Close a real algo trade on its REAL Alpaca exit fill (not sim replay).
+        Sets status/exit_price/exit_date + any sim/real close columns passed."""
+        allowed = {"pnl_usd", "return_pct", "r_multiple", "real_pnl_usd",
+                   "real_return_pct", "real_r_multiple", "exit_fill_price",
+                   "exit_slippage_bps", "exit_time_to_fill", "gap_through_stop"}
+        sets = {k: v for k, v in fields.items() if k in allowed}
+        sets.update({"status": "closed", "exit_price": exit_price, "exit_date": _now(),
+                     "exit_reason": exit_reason, "outcome": outcome})
+        assignments = ", ".join(f"{k} = :{k}" for k in sets)
+        with self._conn() as conn:
+            conn.execute(f"UPDATE paper_trades SET {assignments} WHERE id = :tid",
+                         dict(sets, tid=trade_id))
+
     def get_sim_vs_real(self, limit: int = 30) -> list[dict[str, Any]]:
         with self._conn() as conn:
             rows = conn.execute("SELECT * FROM sim_vs_real LIMIT ?", (limit,)).fetchall()

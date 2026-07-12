@@ -142,6 +142,14 @@ def resolve_open(db: Database) -> dict[str, int]:
     summary = {"checked": len(open_trades), "wins": 0, "losses": 0, "expired": 0, "still_open": 0}
 
     for t in open_trades:
+        # REAL Alpaca positions (is_real=1) are closed by the fill reconciler on
+        # their real exit fill -- NEVER by sim replay, which would mark a live
+        # position closed and corrupt open-risk accounting (the "sim closer marks
+        # real as closed" footgun). Sim numbers for those rows are computed from
+        # the planned levels at real-exit time. (B1)
+        if t.get("is_real"):
+            summary["still_open"] += 1
+            continue
         try:
             entry_dt = datetime.fromisoformat(t["entry_date"])
         except (ValueError, TypeError):

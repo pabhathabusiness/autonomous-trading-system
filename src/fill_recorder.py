@@ -122,6 +122,54 @@ def parse_exit_fill(order: Optional[dict[str, Any]], *, planned_exit: Optional[f
     return out
 
 
+def find_filled_exit_leg(order: Optional[dict[str, Any]]) -> Optional[tuple[dict, str]]:
+    """From a bracket PARENT order's legs, the first FILLED exit leg + its kind
+    ('stop' | 'target'), or None. Requires the order fetched with nested=true."""
+    if not order or not isinstance(order, dict):
+        return None
+    for leg in (order.get("legs") or []):
+        if (leg.get("status") or "").lower() != "filled":
+            continue
+        if _f(leg.get("filled_avg_price")) is None:
+            continue
+        typ = (leg.get("order_type") or leg.get("type") or "").lower()
+        kind = "stop" if ("stop" in typ or leg.get("stop_price")) else "target"
+        return leg, kind
+    return None
+
+
+def compute_real_close(entry_fill: Optional[float], exit_fill: Optional[float],
+                       stop: Optional[float], qty: Optional[float],
+                       direction: str = "long") -> dict[str, Any]:
+    """Realized $ / % / R from the ACTUAL entry and exit fills."""
+    if not entry_fill or not exit_fill or not qty:
+        return {}
+    sign = 1.0 if direction != "short" else -1.0
+    pnl = sign * (exit_fill - entry_fill) * qty
+    ret = sign * (exit_fill / entry_fill - 1.0) * 100.0 if entry_fill else None
+    risk_ps = abs(entry_fill - stop) if stop else None
+    r = (sign * (exit_fill - entry_fill) / risk_ps) if risk_ps else None
+    return {"real_pnl_usd": round(pnl, 2),
+            "real_return_pct": round(ret, 2) if ret is not None else None,
+            "real_r_multiple": round(r, 2) if r is not None else None}
+
+
+def compute_sim_close(planned_entry: Optional[float], exit_level: Optional[float],
+                      shares: Optional[float], stop: Optional[float],
+                      direction: str = "long") -> dict[str, Any]:
+    """The SIM counterfactual: fill AT the planned entry and exit AT the plan
+    level the bracket hit -- what the internal sim would have recorded. Stored in
+    pnl_usd/return_pct/r_multiple beside the real_* fills for sim_vs_real."""
+    if not planned_entry or not exit_level or not shares:
+        return {}
+    sign = 1.0 if direction != "short" else -1.0
+    risk_ps = abs(planned_entry - stop) if stop else None
+    return {"pnl_usd": round(sign * (exit_level - planned_entry) * shares, 2),
+            "return_pct": round(sign * (exit_level / planned_entry - 1.0) * 100.0, 2),
+            "r_multiple": (round(sign * (exit_level - planned_entry) / risk_ps, 2)
+                           if risk_ps else None)}
+
+
 # ---------------------------------------------------------------- DB write helpers
 def record_submission(db, trade_id: int, resp: Optional[dict[str, Any]], *,
                       planned_entry: Optional[float] = None) -> dict[str, Any]:

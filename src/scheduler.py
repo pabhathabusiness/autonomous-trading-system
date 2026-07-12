@@ -69,6 +69,11 @@ def close_on_live_cross(db, alpaca) -> int:
     prices = alpaca.latest_prices(sorted({t["symbol"] for t in open_trades}))
     closed = 0
     for t in open_trades:
+        # REAL Alpaca positions close on their broker-managed bracket + the fill
+        # reconciler, never on our live-cross (which would close a live position
+        # at a plan level it never really filled at). (B1)
+        if t.get("is_real"):
+            continue
         lp = prices.get(t["symbol"], {}).get("price")
         if lp is None:
             continue

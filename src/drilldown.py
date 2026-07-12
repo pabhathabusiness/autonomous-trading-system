@@ -29,23 +29,43 @@ def _resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     return df[cols].resample(rule).agg({c: agg[c] for c in cols}).dropna()
 
 
+def _yf(symbol: str, period: str, interval: str) -> Optional[pd.DataFrame]:
+    try:
+        df = yf.Ticker(symbol).history(period=period, interval=interval, auto_adjust=True)
+        return df.dropna() if (df is not None and not df.empty) else None
+    except Exception:
+        return None
+
+
 def _frames(alpaca, symbol: str) -> dict[str, pd.DataFrame]:
     frames: dict[str, pd.DataFrame] = {}
+    # prefer Alpaca's real-time IEX intraday bars when they come through...
     if alpaca and getattr(alpaca, "enabled", False):
-        b15 = alpaca.bars([symbol], "15m", limit=400).get(symbol)
-        b1h = alpaca.bars([symbol], "1h", limit=400).get(symbol)
+        try:
+            b15 = alpaca.bars([symbol], "15m", limit=400).get(symbol)
+            b1h = alpaca.bars([symbol], "1h", limit=400).get(symbol)
+        except Exception:
+            b15 = b1h = None
         if b15 is not None and not b15.empty:
             frames["15m"] = b15
             frames["30m"] = _resample(b15, "30min")
         if b1h is not None and not b1h.empty:
             frames["1h"] = b1h
             frames["4h"] = _resample(b1h, "4h")
-    try:
-        d = yf.Ticker(symbol).history(period="1y", interval="1d", auto_adjust=True)
-        if d is not None and not d.empty:
-            frames["daily"] = d
-    except Exception:
-        pass
+    # ...otherwise fall back to yfinance intraday (15m/60m), like the analyzer does
+    if "15m" not in frames:
+        y15 = _yf(symbol, "60d", "15m")
+        if y15 is not None:
+            frames["15m"] = y15
+            frames.setdefault("30m", _resample(y15, "30min"))
+    if "1h" not in frames:
+        y1h = _yf(symbol, "6mo", "1h")
+        if y1h is not None:
+            frames["1h"] = y1h
+            frames.setdefault("4h", _resample(y1h, "4h"))
+    d = _yf(symbol, "1y", "1d")
+    if d is not None:
+        frames["daily"] = d
     return frames
 
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -189,6 +189,12 @@ CREATE TABLE IF NOT EXISTS watchlist (
     note TEXT,
     added_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS news_cache (
+    key TEXT PRIMARY KEY,
+    payload_json TEXT,
+    fetched_at TEXT
+);
 """
 
 
@@ -230,6 +236,8 @@ class Database:
                 ("strategy", "TEXT"),
                 # Lane 1.4: direction at proposal time (downside=short, else long)
                 ("direction", "TEXT"),
+                # Phase 4a: event risk at proposal time, from the earnings cache
+                ("days_to_earnings", "INTEGER"),
             ],
             "paper_trades": [
                 ("direction", "TEXT"),
@@ -381,23 +389,82 @@ class Database:
         # 284 pre-existing rows were backfilled 2026-07-11 via the paper_trades
         # JOIN + this same strategy rule, proven conflict-free first.)
         data.setdefault("direction", "short" if data["strategy"] == "downside" else "long")
+        # Phase 4a: event risk stamped at write time from the cached earnings
+        # calendar (None when the cache is empty/keyless -- display handles it).
+        data.setdefault("days_to_earnings", self.days_to_earnings(data.get("symbol")))
         with self._conn() as conn:
             cur = conn.execute(
                 """INSERT INTO proposals
                    (created_at, account_type, symbol, sector_name, entry_price,
                     stop_loss, target_price, risk_reward, quality_score,
                     confidence, num_edges, edges_fired, strategy, direction,
-                    position_size_usd, shares, risk_amount, expected_return_pct,
-                    expected_timeframe, reasoning, status)
+                    days_to_earnings, position_size_usd, shares, risk_amount,
+                    expected_return_pct, expected_timeframe, reasoning, status)
                    VALUES (:created_at, :account_type, :symbol, :sector_name,
                            :entry_price, :stop_loss, :target_price, :risk_reward,
                            :quality_score, :confidence, :num_edges, :edges_fired,
-                           :strategy, :direction, :position_size_usd, :shares, :risk_amount,
+                           :strategy, :direction, :days_to_earnings,
+                           :position_size_usd, :shares, :risk_amount,
                            :expected_return_pct, :expected_timeframe, :reasoning,
                            'pending')""",
                 {"created_at": _now(), **data},
             )
             return cur.lastrowid
+
+    # ------------------------------------------------------- news/earnings cache
+    def cache_get(self, key: str) -> Optional[dict[str, Any]]:
+        """{'payload': .., 'fetched_at': iso, 'age_seconds': float} or None."""
+        with self._conn() as conn:
+            row = conn.execute("SELECT payload_json, fetched_at FROM news_cache WHERE key = ?",
+                               (key,)).fetchone()
+        if not row:
+            return None
+        try:
+            payload = json.loads(row["payload_json"])
+        except (TypeError, ValueError):
+            return None
+        try:
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(row["fetched_at"])).total_seconds()
+        except (TypeError, ValueError):
+            age = None
+        return {"payload": payload, "fetched_at": row["fetched_at"], "age_seconds": age}
+
+    def cache_put(self, key: str, payload: Any) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO news_cache (key, payload_json, fetched_at) VALUES (?, ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET payload_json=excluded.payload_json,
+                                                  fetched_at=excluded.fetched_at""",
+                (key, json.dumps(payload), _now()),
+            )
+
+    def days_to_earnings(self, symbol: Optional[str]) -> Optional[int]:
+        """Trading-agnostic calendar-day distance to the symbol's next earnings,
+        from the cached Finnhub calendar ('earnings:calendar'). None if unknown."""
+        if not symbol:
+            return None
+        hit = self.cache_get("earnings:calendar")
+        if not hit:
+            return None
+        # earnings dates are US-market (ET) dates; UTC "today" is already
+        # tomorrow during the ET evening, which would shave a day off
+        try:
+            from zoneinfo import ZoneInfo
+            today = datetime.now(ZoneInfo("America/New_York")).date()
+        except Exception:
+            today = (datetime.now(timezone.utc) - timedelta(hours=4)).date()
+        best: Optional[int] = None
+        for e in (hit["payload"] or {}).get("earningsCalendar", []):
+            if str(e.get("symbol", "")).upper() != str(symbol).upper():
+                continue
+            try:
+                d = datetime.fromisoformat(e.get("date", "")).date()
+            except (TypeError, ValueError):
+                continue
+            delta = (d - today).days
+            if delta >= 0 and (best is None or delta < best):
+                best = delta
+        return best
 
     def get_proposals(self, status: Optional[str] = None, account_type: Optional[str] = None) -> list[dict[str, Any]]:
         # proposals.direction is authoritative as of 2026-07-11 (Lane 1.4): written

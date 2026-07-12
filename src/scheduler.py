@@ -28,7 +28,7 @@ import threading
 import time
 from datetime import datetime, time as dt_time, timezone
 
-from src import paper_trader, post_close
+from src import news_refresher, paper_trader, post_close
 
 logger = logging.getLogger(__name__)
 
@@ -87,11 +87,12 @@ def close_on_live_cross(db, alpaca) -> int:
 
 
 class AutonomousScheduler:
-    def __init__(self, config, db, alpaca, scan_fn):
+    def __init__(self, config, db, alpaca, scan_fn, finnhub=None):
         ac = config.get("autonomous", {}) or {}
         self.config = config
         self.db = db
         self.alpaca = alpaca
+        self.finnhub = finnhub                    # Phase 4: news/earnings refresher
         self.scan_fn = scan_fn                    # zero-arg callable -> run_full_scan
         self.enabled = ac.get("enabled", True)
         self.scan_interval = max(60, ac.get("scan_interval_min", 15) * 60)
@@ -151,6 +152,10 @@ class AutonomousScheduler:
             # derive exit_reason / MAE-MFE / quadrant for anything newly closed
             # (enrich-only writes; the close functions themselves stay untouched)
             self._safe(lambda: post_close.enrich_closed(self.db), "post-close-enrich")
+            # Phase 4: one sequential news/earnings refresh pass (rate-budgeted
+            # inside the client; a no-op when FINNHUB_KEY is absent)
+            if self.finnhub is not None:
+                self._safe(lambda: news_refresher.tick(self.db, self.finnhub), "news-refresh")
         self.last_monitor_at = datetime.now(timezone.utc).isoformat()
         if live_closed or summary.get("wins") or summary.get("losses") or summary.get("expired"):
             logger.info("Monitor: live_closed=%s replay=%s", live_closed, summary)

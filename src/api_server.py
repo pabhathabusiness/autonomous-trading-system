@@ -29,6 +29,8 @@ from src import bias_strip as bias_strip_module
 from src import drilldown as drilldown_module
 from src import live as live_module
 from src import market_overview as market_overview_module
+from src import news_refresher
+from src.finnhub_client import FinnhubClient
 from src import paper_trader
 from src.scheduler import AutonomousScheduler
 from src.alpaca_client import AlpacaClient
@@ -347,6 +349,7 @@ DB = Database(CONFIG["database"]["path"])
 DB.seed_accounts(CONFIG["accounts"])
 RH = RobinhoodClient(CONFIG)
 ALPACA = AlpacaClient(CONFIG)
+FINNHUB = FinnhubClient()   # key from .env only; disabled cleanly when absent
 SECTOR_ANALYZER = SectorAnalyzer(CONFIG)
 TECH = TechnicalAnalyzer(CONFIG)
 
@@ -712,7 +715,8 @@ def trigger_scan() -> dict[str, Any]:
 # Replaces the manual "Run Scan": scans on a cadence + continuously monitors and
 # closes open positions at target/stop. Set env DASH_NO_SCHED=1 to disable (e.g.
 # during tests). Opening trades is simulated unless autonomous.auto_execute=true.
-SCHEDULER = AutonomousScheduler(CONFIG, DB, ALPACA, lambda: run_full_scan(CONFIG, DB, RH))
+SCHEDULER = AutonomousScheduler(CONFIG, DB, ALPACA, lambda: run_full_scan(CONFIG, DB, RH),
+                                finnhub=FINNHUB)
 
 
 @app.on_event("startup")
@@ -731,6 +735,54 @@ def _stop_scheduler() -> None:
 @app.get("/api/scheduler")
 def scheduler_status() -> dict[str, Any]:
     return SCHEDULER.status()
+
+
+# ---- Phase 4: Finnhub-backed cached news/earnings routes (cache reads ONLY;
+# the background refresher is the sole caller of Finnhub; display-only data) ----
+def _cached_news(key: str) -> dict[str, Any]:
+    hit = DB.cache_get(key)
+    return {"items": (hit or {}).get("payload") or [],
+            "fetched_at": (hit or {}).get("fetched_at"),
+            "stale": hit is None or (hit.get("age_seconds") or 1e9) > 3600,
+            "finnhub_enabled": FINNHUB.enabled}
+
+
+@app.get("/api/news/market")
+def news_market() -> dict[str, Any]:
+    return _cached_news("news:market")
+
+
+@app.get("/api/news/symbol/{ticker}")
+def news_symbol(ticker: str) -> dict[str, Any]:
+    news_refresher.register_interest("symbol", ticker)   # lazy refresh registration
+    return _cached_news(f"news:symbol:{ticker.upper()}")
+
+
+@app.get("/api/news/sector/{etf}")
+def news_sector(etf: str) -> dict[str, Any]:
+    news_refresher.register_interest("sector", etf)
+    return _cached_news(f"news:sector:{etf.upper()}")
+
+
+@app.get("/api/earnings/upcoming")
+def earnings_upcoming(days: int = 14) -> dict[str, Any]:
+    hit = DB.cache_get("earnings:calendar")
+    rows = []
+    if hit:
+        today = datetime.now(timezone.utc).date()
+        for e in (hit["payload"] or {}).get("earningsCalendar", []):
+            try:
+                d = datetime.fromisoformat(e.get("date", "")).date()
+            except (TypeError, ValueError):
+                continue
+            delta = (d - today).days
+            if 0 <= delta <= days:
+                rows.append({"symbol": e.get("symbol"), "date": e.get("date"),
+                             "days_away": delta, "hour": e.get("hour"),
+                             "eps_estimate": e.get("epsEstimate")})
+    rows.sort(key=lambda r: (r["days_away"], r["symbol"] or ""))
+    return {"days": days, "count": len(rows), "earnings": rows,
+            "fetched_at": (hit or {}).get("fetched_at"), "finnhub_enabled": FINNHUB.enabled}
 
 
 @app.get("/api/drilldown/{symbol}")

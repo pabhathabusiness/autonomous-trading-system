@@ -484,11 +484,44 @@ class Database:
         with self._conn() as conn:
             return [dict(r) for r in conn.execute(query, params).fetchall()]
 
-    def get_algo_trades(self, status: Optional[str] = None) -> list[dict[str, Any]]:
+    # Lane 5: server-side sort allowlist. Values are SQL expressions (never user
+    # input); rr/quality COALESCE to the proposal JOIN, grades map to ordinals.
+    _ALGO_SORTS = {
+        "entry_date": "pt.entry_date",
+        "symbol": "pt.symbol",
+        "setup": "pt.archetype",
+        "band": "pt.timeframe_band",
+        "rr": "COALESCE(pt.planned_rr, p.risk_reward)",
+        "quality": "p.quality_score",
+        "grade": ("CASE COALESCE(NULLIF(pt.process_grade,'UNGRADED'), pt.retro_grade) "
+                  "WHEN 'A' THEN 5 WHEN 'B' THEN 4 WHEN 'C' THEN 3 WHEN 'D' THEN 2 "
+                  "WHEN 'F' THEN 1 ELSE NULL END"),
+        "r_multiple": "pt.r_multiple",
+        "return_pct": "pt.return_pct",
+        "mae_r": "pt.mae_r",
+        "mfe_r": "pt.mfe_r",
+        "hold_days": "julianday(COALESCE(pt.exit_date, datetime('now'))) - julianday(pt.entry_date)",
+        "exit_reason": "pt.exit_reason",
+    }
+    # Lane 5 facet params -> columns (exact-match, multi-value OR within a group)
+    _ALGO_FACETS = {
+        "setup": "pt.archetype", "direction": "pt.direction", "band": "pt.timeframe_band",
+        "outcome": "pt.outcome", "exit_reason": "pt.exit_reason", "quadrant": "pt.quadrant",
+        "sector": "pt.sector_name", "market_regime": "pt.market_regime",
+    }
+
+    def get_algo_trades(self, status: Optional[str] = None,
+                        sort: Optional[str] = None, direction: str = "desc",
+                        facets: Optional[dict[str, list[str]]] = None) -> list[dict[str, Any]]:
         """Algo-book trades LEFT-JOINed to their originating proposal (via
         proposal_id), so the dashboard shows the same rich detail the proposal
         table already has -- R:R, quality, edges, written rationale -- even for
-        legacy rows that predate the paper-trade grade/rr columns."""
+        legacy rows that predate the paper-trade grade/rr columns.
+
+        Lane 5 (all additive; defaults preserve the original behavior): `sort`
+        from the _ALGO_SORTS allowlist (nulls always last), `direction`
+        asc|desc, `facets` {group: [values]} AND-ed across groups, OR within.
+        """
         query = """
             SELECT pt.*,
                    p.risk_reward   AS proposal_risk_reward,
@@ -504,7 +537,23 @@ class Database:
         if status:
             query += " AND pt.status = ?"
             params.append(status)
-        query += " ORDER BY pt.entry_date DESC"
+        if facets:
+            with self._conn() as conn:
+                existing = {r["name"] for r in conn.execute("PRAGMA table_info(paper_trades)")}
+        for group, values in (facets or {}).items():
+            col = self._ALGO_FACETS.get(group)
+            vals = [v for v in (values or []) if v]
+            # facet columns that don't exist yet (e.g. market_regime until Lane 4
+            # lands) are silently skipped rather than crashing the query
+            if col and vals and col.split(".")[-1] in existing:
+                query += f" AND {col} IN ({','.join('?' * len(vals))})"
+                params.extend(vals)
+        expr = self._ALGO_SORTS.get(sort or "")
+        if expr:
+            d = "ASC" if str(direction).lower() == "asc" else "DESC"
+            query += f" ORDER BY ({expr}) IS NULL, ({expr}) {d}, pt.entry_date DESC"
+        else:
+            query += " ORDER BY pt.entry_date DESC"
         with self._conn() as conn:
             return [dict(r) for r in conn.execute(query, params).fetchall()]
 

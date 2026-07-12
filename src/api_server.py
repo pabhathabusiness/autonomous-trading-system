@@ -761,12 +761,26 @@ def get_bias_strip() -> dict[str, Any]:
 
 
 @app.get("/api/log/algo")
-def get_algo_log(status: Optional[str] = None) -> dict[str, Any]:
+def get_algo_log(status: Optional[str] = None,
+                 sort: Optional[str] = None, dir: str = "desc",
+                 setup: Optional[str] = None, direction: Optional[str] = None,
+                 band: Optional[str] = None, outcome: Optional[str] = None,
+                 exit_reason: Optional[str] = None, quadrant: Optional[str] = None,
+                 sector: Optional[str] = None, market_regime: Optional[str] = None) -> dict[str, Any]:
     """Autonomous Algo book (Log B): every scanner-opened trade with its process
     grade + classification, newest first. `open` / `closed` filterable. Each row
     is enriched from its originating proposal so R:R / quality / edges / rationale
-    are present even on legacy rows that predate the grade columns."""
-    trades = DB.get_algo_trades(status=status)
+    are present even on legacy rows that predate the grade columns.
+
+    Lane 5 additions (all optional/additive; response shape unchanged): `sort` +
+    `dir` (allowlisted server-side), and comma-separable facet params (setup,
+    direction, band, outcome, exit_reason, quadrant, sector, market_regime)."""
+    raw = {"setup": setup, "direction": direction, "band": band, "outcome": outcome,
+           "exit_reason": exit_reason, "quadrant": quadrant, "sector": sector,
+           "market_regime": market_regime}
+    facets = {k: v.split(",") for k, v in raw.items() if v}
+    trades = DB.get_algo_trades(status=status, sort=sort, direction=dir,
+                                facets=facets or None)
     for t in trades:
         # display R:R: the trade's own planned_rr, else the proposal's R:R
         t["risk_reward"] = t.get("planned_rr") if t.get("planned_rr") is not None \

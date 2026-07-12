@@ -938,16 +938,16 @@ def _smallcap_lane_stats(trades: list[dict[str, Any]]) -> dict[str, Any]:
                 "max_dd_r": round(dd, 2), "sum_r": round(sum(rs), 2) if rs else 0.0}
 
     lanes = {lane: stats_for(rows) for lane, rows in by_lane.items()}
-    agg_rows = [t for t in trades if (t.get("lane") or "") != "hailmary"]
-    lanes["aggregate_ex_hailmary"] = stats_for(agg_rows)
+    lanes["aggregate"] = stats_for(trades)
 
-    def graduation(lane: str, s: dict[str, Any]) -> str:
-        if lane == "hailmary":
-            return "Permanently paper (hypothesis lab)."
-        if (s["n_closed"] >= 30 and (s["expectancy_r"] or -9) > 0.15 and s["max_dd_r"] > -10):
-            return "LIVE-ELIGIBLE (n>=30, expectancy>+0.15R, maxDD<10R)."
-        return f"Paper only ({s['n_closed']}/30 closed; needs +0.15R exp, <10R DD)."
-    grads = {lane: graduation(lane, s) for lane, s in lanes.items() if lane != "aggregate_ex_hailmary"}
+    def graduation(s: dict[str, Any]) -> str:
+        # PROVING_GROUND: lanes graduate INDIVIDUALLY at n>=20 and >=+0.10R.
+        if s["n_closed"] < 20:
+            return f"Paper ({s['n_closed']}/20 closed)."
+        if (s["expectancy_r"] or -9) >= 0.10 and s["max_dd_r"] > -15:
+            return "LANE-ELIGIBLE (n>=20, exp>=+0.10R, DD<15R)."
+        return f"Paper — {s['expectancy_r']}R (need +0.10R over n>=20)."
+    grads = {lane: graduation(s) for lane, s in lanes.items() if lane != "aggregate"}
     return {"lanes": lanes, "graduation": grads}
 
 

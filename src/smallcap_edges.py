@@ -103,9 +103,11 @@ def insider_score(txns: Optional[list[dict[str, Any]]], asof: Optional[datetime]
     error -> drop it + log (never let a bad row inflate the signal)."""
     asof = asof or datetime.now(timezone.utc)
     out = {"score": 0.0, "cluster": False, "buyers_distinct": 0, "net_dollars": 0.0,
-           "net_shares": 0.0, "last_buy_days_ago": None, "heavy_selling": False, "dropped_rows": 0}
+           "net_shares": 0.0, "last_buy_days_ago": None, "heavy_selling": False,
+           "dropped_rows": 0, "available": False}
     if not txns:
-        return out
+        return out                              # no filings -> family UNAVAILABLE (BUG-5)
+    out["available"] = True
     cap_dollars = market_cap_m * 1e6 if market_cap_m else None
     buys, sells_dollars = [], 0.0
     for t in txns:

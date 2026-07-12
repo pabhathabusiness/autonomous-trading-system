@@ -496,3 +496,6 @@ table.track .feedback { max-width: 230px; font-size: 12px; }
   color: #a78bfa; border: 1px solid #7c3aed; vertical-align: middle; }
 .sc-ptier { font-size: 10px; color: var(--muted); text-transform: uppercase; }
 .sc-card-sp { border-color: #2f6f52; background: linear-gradient(180deg, rgba(46,204,113,.05), var(--card-bg)); }
+
+/* final-six lane thesis line */
+.sc-thesis { font-size: 12px; color: var(--muted); font-style: italic; margin: -4px 0 12px; }

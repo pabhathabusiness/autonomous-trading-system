@@ -19,11 +19,10 @@ from src.database import Database
 logger = logging.getLogger(__name__)
 
 # fixed paper notional per lane ($). Hail-Mary is fixed + never scaled (the cage).
-_NOTIONAL = {"runner": 2500.0, "bounce": 3000.0, "value": 4000.0, "hailmary": 1500.0,
-             "coiled": 2500.0, "special": 4000.0}
-_HAILMARY_MAX_OPEN = 2
-_DEEP_MAX_OPEN = 3          # A3 Part 2: deep tier ($0.20-1) fixed tiny notional, max 3 open
-_DEEP_NOTIONAL = 800.0
+_NOTIONAL = {"reversal": 3000.0, "breakout": 3000.0, "compression": 2500.0,
+             "emerging_strength": 3000.0, "hidden_value": 4000.0, "turnaround": 3000.0}
+_DEEP_MAX_OPEN = 3          # deep tier ($0.20-1) fixed tiny notional, max 3 open (no lane
+_DEEP_NOTIONAL = 800.0      # currently accepts deep, so this is a defensive guard)
 # lane stop floor (fraction below entry) when structure is unavailable
 _STOP_PCT = {"runner": 0.08, "bounce": 0.07, "value": 0.15, "hailmary": 0.15}
 
@@ -56,11 +55,7 @@ def open_smallcap_trigger(db: Database, trigger: dict[str, Any],
     """Open one trigger as a book='smallcap' paper trade. Returns the trade id,
     or None if skipped (Hail-Mary cage full / duplicate open for symbol+lane)."""
     lane = trigger["lane"]
-    if lane == "hailmary" and db.count_open_smallcap("hailmary") >= _HAILMARY_MAX_OPEN:
-        logger.info("hailmary cage full (%d open) -- skipping %s",
-                    _HAILMARY_MAX_OPEN, trigger.get("symbol"))
-        return None
-    # A3 Part 2: deep tier ($0.20-1) is caged at max 3 open across the whole tier.
+    # deep tier ($0.20-1) is caged at max 3 open across the whole tier.
     if trigger.get("price_tier") == "deep":
         deep_open = sum(1 for t in db.get_smallcap_trades(status="open")
                         if (t.get("price_tier") == "deep"))

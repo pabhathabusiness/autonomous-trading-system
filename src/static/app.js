@@ -1193,10 +1193,18 @@ function openTrade(id) {
 // ============================ SMALL CAPS (Addendum 2) ============================
 const scEsc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g,
   c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-let scLane = "runner";
+let scLane = "reversal";
 let scCache = { triggers: [], sector_heat: {} };
-const SC_LANE_LABEL = { runner: "Runners", coiled: "Coiled", bounce: "Demand Bounce",
-  value: "Quality Value", special: "Special", hailmary: "Hail Mary" };
+const SC_LANE_LABEL = { reversal: "Reversal", breakout: "Breakout", compression: "Compression",
+  emerging_strength: "Emerging Strength", hidden_value: "Hidden Value", turnaround: "Turnaround" };
+const SC_THESIS = {
+  reversal: "Oversold at a real demand zone — sellers exhausted, buyers stepping in.",
+  breakout: "A quiet base expanding out on volume — the retest is the best entry.",
+  compression: "A squeeze coiled tight — direction unknown until it fires.",
+  emerging_strength: "Early in a move with a sector tailwind, before it's obvious.",
+  hidden_value: "Cheap, real, and uncovered — a business the tape hasn't noticed.",
+  turnaround: "A fundamental inflection forming before the re-rating.",
+  all: "Every triggered lane, ranked by composite.", record: "Per-lane track record." };
 
 async function loadSmallcaps() {
   try {
@@ -1235,7 +1243,7 @@ function scSetLane(lane) {
   $("sc-record").style.display = rec ? "" : "none";
   $("sc-cards").style.display = rec ? "none" : "";
   $("sc-side-blocks").style.display = rec ? "none" : "";
-  $("sc-hm-note").style.display = lane === "hailmary" ? "" : "none";
+  $("sc-thesis").textContent = SC_THESIS[lane] || "";
   if (rec) loadScRecord(); else renderScCards();
 }
 
@@ -1312,7 +1320,7 @@ function renderScDeathwatch(list) {
     : `<p class="muted">none excluded</p>`;
 }
 
-const SC_LANES_ORDER = ["runner", "bounce", "value", "hailmary", "aggregate_ex_hailmary"];
+const SC_LANES_ORDER = ["reversal", "breakout", "compression", "emerging_strength", "hidden_value", "turnaround", "aggregate"];
 async function loadScRecord() {
   const el = $("sc-record");
   el.innerHTML = "Loading…";
@@ -1321,9 +1329,9 @@ async function loadScRecord() {
     const L = d.lanes || {}, G = d.graduation || {};
     const rowFor = (k) => {
       const s = L[k]; if (!s) return "";
-      const label = k === "aggregate_ex_hailmary" ? "AGG (ex-HM)" : (SC_LANE_LABEL[k] || k);
+      const label = k === "aggregate" ? "AGGREGATE" : (SC_LANE_LABEL[k] || k);
       const exp = s.expectancy_r == null ? "-" : signed(s.expectancy_r, 2) + "R";
-      return `<tr class="${k === "aggregate_ex_hailmary" ? "sc-rec-agg" : ""}">
+      return `<tr class="${k === "aggregate" ? "sc-rec-agg" : ""}">
         <td>${label}</td><td>${s.n_closed}</td><td>${s.n_open}</td>
         <td>${s.win_rate == null ? "-" : (s.win_rate * 100).toFixed(0) + "%"}</td>
         <td class="${(s.expectancy_r || 0) >= 0 ? "pos" : "neg"}">${exp}</td>

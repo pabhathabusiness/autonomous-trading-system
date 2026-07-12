@@ -146,10 +146,42 @@ def _support_context(df: pd.DataFrame, price: float) -> dict[str, Any]:
     return out
 
 
+def _base_weekly(df: pd.DataFrame) -> dict[str, Any]:
+    """Base / breakout / retest (daily) + weekly-momentum signals. Feeds the
+    BREAKOUT lane gate and the structure family (Addendum 6 weekly logic)."""
+    out: dict[str, Any] = {}
+    close, high, low, vol = df["Close"], df["High"], df["Low"], df["Volume"]
+    c = float(close.iloc[-1])
+    # daily base = the 15 bars BEFORE today; range < 30% of its low
+    if len(df) >= 20:
+        base = df.iloc[-16:-1]
+        bh, bl = float(base["High"].max()), float(base["Low"].min())
+        rng = (bh - bl) / bl if bl else 1.0
+        out["daily_base"] = bool(rng < 0.30)
+        out["base_high"] = round(bh, 4)
+        out["broke_out"] = bool(c > bh and rng < 0.30)
+        # retest: a close crossed base_high in the last 10d, now back at/above it, holding
+        crossed = bool((close.iloc[-11:-1] > bh).any())
+        out["retest"] = bool(crossed and bh <= c <= bh * 1.05 and float(low.iloc[-1]) >= bh * 0.97)
+    # weekly momentum
+    wk = df.resample("W-FRI").agg({"High": "max", "Low": "min", "Close": "last", "Volume": "sum"}).dropna()
+    if len(wk) >= 9:
+        wc, wv, wl = wk["Close"], wk["Volume"], wk["Low"]
+        prior8_hi = float(wc.iloc[-9:-1].max())
+        v8 = float(wv.iloc[-9:-1].mean())
+        out["weekly_breakout"] = bool(wc.iloc[-1] > prior8_hi and v8 > 0 and wv.iloc[-1] > 1.5 * v8)
+        b6 = wk.iloc[-6:]
+        wrng = (float(b6["High"].max()) - float(b6["Low"].min())) / max(1e-9, float(b6["Low"].min()))
+        out["weekly_base"] = bool(wrng < 0.30)
+        lows = wl.iloc[-4:].tolist()
+        out["weekly_higher_lows"] = bool(len(lows) >= 4 and lows[1] > lows[0] and lows[2] > lows[1] and lows[3] > lows[2])
+    return out
+
+
 def demand_trend_features(df: pd.DataFrame) -> dict[str, Any]:
     """OHLC inputs the lane rubrics need (SMA20/50/200 + slope, %off-60d-high,
-    selling exhaustion, undercut-reclaim, recent-runner, prior-day close, and
-    Lane-2 support-level context)."""
+    selling exhaustion, undercut-reclaim, recent-runner, prior-day close,
+    support-level context, and base/breakout/retest + weekly momentum)."""
     if df is None or len(df) < 60 or "Open" not in df:
         return {}
     close, high, low, vol, opn = df["Close"], df["High"], df["Low"], df["Volume"], df["Open"]
@@ -180,6 +212,7 @@ def demand_trend_features(df: pd.DataFrame) -> dict[str, Any]:
         "prior10_low": round(prior10_low, 4),
     }
     feat.update(_support_context(df, c))
+    feat.update(_base_weekly(df))
     return feat
 
 
@@ -292,6 +325,7 @@ def enrich_symbol(db: Database, fh: FinnhubClient, symbol: str,
         "fundamentals": value_fundamentals(metric, so_m),
         "catalyst": catalyst,
         "catalyst_class": {"weight": news_class["weight"], "type": news_class["type"]},
+        "news_available": news_class.get("count_window", 0) > 0,   # BUG-5: no news != zero signal
         "going_concern": news_class["going_concern"],
         "insider": insider,
         "fundamental_trends": {"revenue_trend": edges.revenue_trend(series)},

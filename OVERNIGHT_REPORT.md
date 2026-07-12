@@ -240,3 +240,50 @@ threshold per F4 if it runs hot.**
    scores"). ARTV triggered value with a DILUTION chip. If you want value to
    reject diluters outright, add dilution_risk as a value-lane hard gate — a
    deliberate deviation from A3's philosophy, so left for your call.
+
+---
+
+## 11. MORNING DEBUG SESSION (P1-P3) — findings + fixes
+
+### P1 — Bias silent-neutral (FIXED, deployed)
+Investigation showed the PRODUCTION engine was actually working (live panel: SPY/
+QQQ/IWM/DIA/RSP bullish; raw recompute of SPY/NVDA/XLK bullish on 105 bars;
+yfinance NOT rate-limited). The T7 "sector=0" was a test-harness artifact — the
+isolated /tmp dry-scan DB had no cached bias panel; the live scan had sectors:11.
+So "everything neutral" did not reproduce on the server.
+Mandated hardening done anyway (correct, and the real risk is my heavy builds
+rate-limiting yfinance): `tf_bias` now returns **`unknown`** (distinct) on
+missing/insufficient/exception data; `neutral` is reserved for a genuine tie on
+real data. Regime = `unknown` when >30% of key inputs are unknown. Coherence gate
+treats unknown as permissive-non-confirming, never a conflict. Frontend renders
+grey "—" + a degraded-regime warning. Commit `65c02bd`.
+
+### P2 — Insider units bug (FIXED, deployed)
+ARTV's ~$1.03B "insider buy" was a units bug: Finnhub `share` is the insider's
+TOTAL holdings (16.7M shares), not the transaction size; `insider_score` summed
+share x price. Fixed to use `change` (the signed transaction delta) + a per-txn
+guard dropping any row > 25% of market cap. Corrected value = $128M, which is
+**real** — RA Capital ($75M + $25M) + GC Corp ($12.5M) genuine open-market
+accumulation in a $468M biotech. **ARTV's value trigger SURVIVES** (6.57, insider
+family) -> it was a real signal; the "2 triggers" conclusion stands. Commit `e04c507`.
+> WEEKDAY RE-VALIDATION STILL OWED: the full-universe trigger rate + threshold
+> re-tune (F4) must run on a trading day. Threshold 6.5 remains provisional.
+
+### P3 — Grade rubric investigation (finding surfaced, NO weights changed)
+Spearman correlation of each grade component with realized r_multiple (n=24 closed
+graded trades):
+
+| component | rho vs r_multiple | read |
+|---|---|---|
+| **num_edges** | **-0.398** | **strongly negative — the prime suspect** |
+| grade score (overall) | -0.105 | mildly inverted (matches T6) |
+| risk_reward | +0.121 | weakly positive (working) |
+| quality | +0.089 | weakly positive (working) |
+
+By bucket: A/B (n=2) had the MOST edges (8.0) but the WORST avg R (-1.0); D/F
+(edges 5.4) sat near breakeven. **Raw edge-counting is actively hurting the
+rubric** — the same over-counting the Addendum-3 "≥3 INDEPENDENT families" rule
+was built to fix. Per instruction: **n=24 (A/B n=2) is far too small to fit to —
+NO weights were changed.** Flagged for review as the sample grows. Candidate fix
+when n is adequate: replace raw edge-count with independent-family-count in the
+main grader, mirroring the small-cap engine.

@@ -1193,7 +1193,8 @@ const scEsc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g,
   c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 let scLane = "runner";
 let scCache = { triggers: [], sector_heat: {} };
-const SC_LANE_LABEL = { runner: "Runners", bounce: "Demand Bounce", value: "Quality Value", hailmary: "Hail Mary" };
+const SC_LANE_LABEL = { runner: "Runners", coiled: "Coiled", bounce: "Demand Bounce",
+  value: "Quality Value", special: "Special", hailmary: "Hail Mary" };
 
 async function loadSmallcaps() {
   try {
@@ -1256,27 +1257,28 @@ function scChip(c) {
 }
 
 function scCard(t) {
-  const tierCls = { runner: "tier-runner", low: "tier-low", standard: "tier-standard" }[t.float_tier] || "";
+  const tierCls = { runner: "tier-runner", low: "tier-low" }[t.float_tier] || "tier-standard";
   const cat = t.catalyst;
   const catHtml = cat ? `<div class="sc-cat"><span class="sc-cat-dot">◆</span>${scEsc(cat.headline || "")}
       <span class="sc-cat-src">${scEsc(cat.source || "")} · ${num(cat.age_h, 0)}h ago</span></div>` : "";
-  const ds = (t.demand_signals || []).map(s => `<span class="sc-ds">${scEsc(s)}</span>`).join("");
+  const fams = (t.families_fired || []).map(f => `<span class="sc-fam">${scEsc(f)}</span>`).join("");
   const chips = (t.chips || []).map(scChip).join("");
-  const reasons = (t.reasons || []).map(r => scEsc(r)).join(" · ");
-  const laneCls = t.lane === "hailmary" ? "sc-card-hm" : "";
+  const comp = t.composite_score != null ? t.composite_score : t.score;
+  const state = t.coiled_state ? `<span class="sc-state">${scEsc(t.coiled_state)}</span>` : "";
+  const laneCls = t.lane === "hailmary" ? "sc-card-hm" : (t.lane === "special" ? "sc-card-sp" : "");
+  const floatM = t.float_est != null ? t.float_est : t.float_shares;
   return `<div class="sc-card ${laneCls}">
     <div class="sc-card-top">
-      <div class="sc-sym">${scEsc(t.symbol)}<span class="sc-lane-tag">${SC_LANE_LABEL[t.lane] || t.lane}</span></div>
-      <div class="sc-score" title="lane score">${num(t.score, 0)}</div>
+      <div class="sc-sym">${scEsc(t.symbol)}<span class="sc-lane-tag">${SC_LANE_LABEL[t.lane] || t.lane}</span>${state}</div>
+      <div class="sc-score" title="multi-edge composite">${num(comp, 1)}<span class="sc-of10">/10</span></div>
     </div>
     <div class="sc-card-row">
-      <span class="sc-px">${price(t.price)}</span>
-      <span class="sc-tier ${tierCls}">${t.float_tier || "?"} · ${num(t.float_shares, 0)}M float${t.so_proxy ? " (SO-proxy)" : ""}</span>
-      <span class="sc-relvol">${num(t.rel_vol, 1)}× rvol</span>
+      <span class="sc-px">${price(t.price)}<span class="sc-ptier"> ${scEsc(t.price_tier || "")}</span></span>
+      <span class="sc-tier ${tierCls}">${t.float_tier || "?"} · ${num(floatM, 0)}M${t.so_proxy ? " SO-est" : ""}</span>
+      <span class="sc-relvol">${num(t.rel_vol, 1)}× rvol · ${t.band || ""}</span>
     </div>
-    <div class="sc-chips">${chips}${ds}</div>
+    <div class="sc-chips">${chips}${fams}</div>
     ${catHtml}
-    <div class="sc-reasons">${reasons}</div>
   </div>`;
 }
 

@@ -38,19 +38,20 @@ def scan_and_open(db: Database, fh: Optional[FinnhubClient] = None,
     Returns a summary; caches the trigger set + sector heat for the page."""
     rows = db.get_smallcap_universe()
 
+    # sector is now a SCORED FAMILY (A4), not a post-hoc bonus. Pass 1 gets
+    # provisional triggers to feed sector heat; pass 2 re-scores with sector_early
+    # folded into the composite (it can legitimately push a borderline name over).
+    prov: list[dict[str, Any]] = []
+    for row in rows:
+        prov.extend(L.evaluate_all(row))
+    heat = sec.compute_sector_heat(db, prov)
+
     triggers: list[dict[str, Any]] = []
     for row in rows:
-        for t in L.evaluate_all(row):
+        se = sec.is_sector_early(heat, row.get("sector_name"))
+        for t in L.evaluate_all(row, sector_early=se):
             t["_signals"] = row.get("signals")   # for the opener's level math
             triggers.append(t)
-
-    # sector heat needs the whole trigger set -> second-pass sector_early bonus
-    heat = sec.compute_sector_heat(db, triggers)
-    for t in triggers:
-        if sec.is_sector_early(heat, t.get("sector_name")) and "SECTOR EARLY" not in t["chips"]:
-            t["score"] = round(t["score"] + 10, 1)
-            t["chips"].append("SECTOR EARLY")
-            t.setdefault("components", {})["sector_early_bonus"] = 10.0
 
     opened = 0
     if open_trades:

@@ -35,9 +35,10 @@ from src import smallcap_signals as ss
 
 logger = logging.getLogger(__name__)
 
-PRICE_MIN, PRICE_MAX = 0.50, 5.00
-MIN_DOLLAR_VOL = 500_000            # 20d avg, below this fills are fiction
-FLOAT_CAP_M = 100.0                 # universe excludes float > 100M
+PRICE_MIN, PRICE_MAX = 0.20, 10.00  # A3 Part 2: four price tiers span $0.20-$10
+MIN_DOLLAR_VOL = 300_000            # A3 1.2: lowered from 500k (was over-tight for cheap tiers)
+FLOAT_CAP_M = 1000.0               # F3: universe ceiling 1B. Float is NEVER a build gate --
+                                   # lanes carry their own float ceilings; float is a scored edge.
 _DILUTION_FORMS = ("S-3", "S-1", "424B", "ATM")
 _ALLOWED_MICS = {"XNAS", "XNYS", "XASE", "ARCX", "BATS"}   # NASDAQ/NYSE/AMEX family
 _PROFILE_TTL_S = 7 * 24 * 3600
@@ -47,17 +48,43 @@ _SYMBOLS_KEY = "sc:us_symbols"
 
 
 # ---------------------------------------------------------------- pure helpers
-def float_tier(so_m: Optional[float]) -> Optional[str]:
-    """runner < 20M | low 20-30M | standard 30-100M | None (>100M or unknown =>
-    excluded from the universe)."""
-    if so_m is None:
+def float_est_m(so_m: Optional[float]) -> Optional[float]:
+    """SO-proxy inflates true float; F3/A3 1.1 documented 0.85 haircut, for TIER
+    DISPLAY ONLY. The field is labeled 'SO-proxy (est)' -- never presented as true float."""
+    return round(so_m * 0.85, 2) if so_m is not None else None
+
+
+def float_tier(float_m: Optional[float]) -> Optional[str]:
+    """A3 1.1 tiers (on the float_est haircut): runner <20 | low 20-50 | mid 50-150
+    | standard 150-500 | large 500-1000M. None => >1B (in universe, but no lane
+    matches -> never triggers). Float is NEVER a universe gate."""
+    if float_m is None:
         return None
-    if so_m < 20:
+    if float_m < 20:
         return "runner"
-    if so_m < 30:
+    if float_m < 50:
         return "low"
-    if so_m <= FLOAT_CAP_M:
+    if float_m < 150:
+        return "mid"
+    if float_m <= 500:
         return "standard"
+    if float_m <= FLOAT_CAP_M:
+        return "large"
+    return None
+
+
+def price_tier(price: Optional[float]) -> Optional[str]:
+    """A3 Part 2: deep $0.20-1 | sub2 $1-2 | low $2-5 | special $5-10."""
+    if price is None:
+        return None
+    if price < 1.0:
+        return "deep"
+    if price < 2.0:
+        return "sub2"
+    if price < 5.0:
+        return "low"
+    if price <= 10.0:
+        return "special"
     return None
 
 
@@ -235,9 +262,12 @@ def enrich_symbol(db: Database, fh: FinnhubClient, symbol: str,
 
     prof = _cached(db, f"sc:profile2:{symbol}", _PROFILE_TTL_S, lambda: fh.profile2(symbol)) or {}
     so_m = prof.get("shareOutstanding")
-    tier = float_tier(so_m)
-    if tier is None:
-        return {"status": "skip_float", "symbol": symbol, "so": so_m}
+    fl_est = float_est_m(so_m)              # SO-proxy 0.85 haircut, tier display only
+    tier = float_tier(fl_est)
+    ptier = price_tier(price)
+    # F3: float is NEVER a universe gate. A name with tier None (>1B float) is
+    # still stored -- it simply won't match any lane's float ceiling, so it never
+    # triggers. Nothing is skipped for being "too big".
 
     filings = _cached(db, f"sc:filings:{symbol}", _FIN_TTL_S, lambda: fh.filings(symbol, 180))
     dilution_risk, dil_forms = dilution_from_filings(filings)
@@ -254,12 +284,16 @@ def enrich_symbol(db: Database, fh: FinnhubClient, symbol: str,
         "reverse_split": ss.reverse_split_flags(splits),
         "dilution_forms": dil_forms,
     }
+    delisting_risk = 1 if (sig.get("sub_dollar_streak") or 0) > 20 else 0
+    signals_blob["delisting_risk"] = delisting_risk
     row = {
         "symbol": symbol,
         "price": price,
+        "price_tier": ptier,
         "exchange": prof.get("exchange"),
         "sector_name": prof.get("finnhubIndustry"),
         "float_shares": so_m,
+        "float_est": fl_est,
         "so_proxy": 1,                               # never true free-float on free tier
         "float_tier": tier,
         "avg_dollar_vol_20d": sig["avg_dollar_vol_20d"],

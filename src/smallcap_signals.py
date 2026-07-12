@@ -124,22 +124,14 @@ def reverse_split_flags(splits: Optional[pd.Series], asof: Optional[datetime] = 
 
 def deathwatch_ohlc(daily: pd.DataFrame, splits: Optional[pd.Series],
                     asof: Optional[datetime] = None) -> Optional[tuple[str, str]]:
-    """Deathwatch criteria derivable WITHOUT Finnhub (spec a, b, e). Returns the
-    (reason, detail) of the first hard-exclusion hit, else None. Criteria c
-    (going-concern text) and d (share-count treadmill) need Finnhub filings and
-    are evaluated in the Finnhub layer once the key is live -- not faked here."""
+    """HARD deathwatch derivable WITHOUT Finnhub. Addendum 3 1.4: reverse-split
+    (a, b) stay HARD -- those catch the zombies. The sub-$1 rule (e) is NO LONGER
+    a hard exclusion here (it banned the sub-$1 tiers the user wants); it becomes
+    a scored -1.5 DELISTING-RISK penalty in the lane engine instead. Criteria c
+    (going-concern) and d (share treadmill) live in the Finnhub layer."""
     rs = reverse_split_flags(splits, asof)
     if rs["serial_reverse"]:
         return ("serial_reverse_split", f"{rs['reverse_count_5y']} reverse splits in 5y (permanent)")
     if rs["reverse_18mo"]:
         return ("reverse_split_18mo", "reverse split within 18 months")
-    if daily is not None and not daily.empty:
-        streak = 0
-        for c in daily["Close"].iloc[::-1]:
-            if c < 1.0:
-                streak += 1
-            else:
-                break
-        if streak > 20:
-            return ("sub_dollar_20d", f"close < $1 for {streak} consecutive sessions")
     return None

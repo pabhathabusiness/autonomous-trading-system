@@ -216,11 +216,13 @@ CREATE TABLE IF NOT EXISTS smallcap_universe (
     symbol TEXT PRIMARY KEY,
     updated_at TEXT,
     price REAL,
+    price_tier TEXT,            -- special | low | sub2 | deep (A3 Part 2)
     exchange TEXT,
     sector_name TEXT,
-    float_shares REAL,          -- millions
+    float_shares REAL,          -- millions (raw SO)
+    float_est REAL,             -- SO-proxy 0.85 haircut, tier display only
     so_proxy INTEGER,           -- 1 = shares-outstanding proxy, not true float
-    float_tier TEXT,            -- runner | low | standard
+    float_tier TEXT,            -- runner | low | mid | standard | large
     avg_dollar_vol_20d REAL,
     rel_vol REAL,               -- v1 daily
     bb_percentile REAL,
@@ -336,6 +338,17 @@ class Database:
                 ("lane", "TEXT"),   # runner | bounce | value | hailmary (book='smallcap' rows)
                 ("lane_score", "REAL"),     # the lane rubric score at trigger
                 ("trigger_json", "TEXT"),   # reasons/chips/catalyst snapshot
+                # --- Addendum 3 / 6: multi-edge composite, price tier, hold band ---
+                ("composite_score", "REAL"),   # 0-10 multi-edge composite at trigger
+                ("price_tier", "TEXT"),        # special | low | sub2 | deep
+                ("hold_band", "TEXT"),         # overnight | short | medium | position
+                ("gap_pct", "REAL"),           # overnight band: (next open - prior close)/prior close
+                ("hit_time_stop", "INTEGER"),  # band time-stop auto-close flag
+            ],
+            # Addendum 3: small-cap universe gains price tier + SO-proxy float estimate
+            "smallcap_universe": [
+                ("price_tier", "TEXT"),
+                ("float_est", "REAL"),
             ],
         }
         for table, cols in migrations.items():
@@ -551,11 +564,11 @@ class Database:
 
     # ------------------------------------------------ Addendum 2: small-cap lane
     _SC_UNIVERSE_COLS = (
-        "symbol", "updated_at", "price", "exchange", "sector_name", "float_shares",
-        "so_proxy", "float_tier", "avg_dollar_vol_20d", "rel_vol", "bb_percentile",
-        "daily_compression", "compression_extreme", "squeeze_days", "up_wow",
-        "consecutive_up_weeks", "dilution_risk", "upside_to_target_pct", "has_options",
-        "options_liquid", "has_leaps", "signals_json",
+        "symbol", "updated_at", "price", "price_tier", "exchange", "sector_name",
+        "float_shares", "float_est", "so_proxy", "float_tier", "avg_dollar_vol_20d",
+        "rel_vol", "bb_percentile", "daily_compression", "compression_extreme",
+        "squeeze_days", "up_wow", "consecutive_up_weeks", "dilution_risk",
+        "upside_to_target_pct", "has_options", "options_liquid", "has_leaps", "signals_json",
     )
 
     def upsert_smallcap_universe(self, row: dict[str, Any]) -> None:
@@ -704,6 +717,7 @@ class Database:
                   "process_grade", "process_score", "process_flags", "process_notes",
                   "shares", "position_value", "market_regime", "mtf_alignment",
                   "lane", "lane_score", "trigger_json",
+                  "composite_score", "price_tier", "hold_band",
                   # proposal-only fields -- None for non-proposal callers (small-caps)
                   "proposal_id", "account_type", "confidence", "num_edges", "edges_fired"):
             data.setdefault(k, None)
@@ -716,14 +730,15 @@ class Database:
                     book, source, archetype, timeframe_band, entry_type, pattern, rs_vs_spy,
                     compression_tf, planned_rr, process_grade, process_score, process_flags,
                     process_notes, shares, position_value, market_regime, mtf_alignment,
-                    lane, lane_score, trigger_json)
+                    lane, lane_score, trigger_json, composite_score, price_tier, hold_band)
                    SELECT :proposal_id, :symbol, :account_type, :strategy, :direction, :confidence,
                           :num_edges, :edges_fired, :sector_name, :entry_price, :stop_loss,
                           :target_price, :expected_timeframe, :entry_date, :max_hold_days, 'open',
                           :book, :source, :archetype, :timeframe_band, :entry_type, :pattern,
                           :rs_vs_spy, :compression_tf, :planned_rr, :process_grade, :process_score,
                           :process_flags, :process_notes, :shares, :position_value,
-                          :market_regime, :mtf_alignment, :lane, :lane_score, :trigger_json
+                          :market_regime, :mtf_alignment, :lane, :lane_score, :trigger_json,
+                          :composite_score, :price_tier, :hold_band
                    WHERE NOT EXISTS (
                        SELECT 1 FROM paper_trades
                        WHERE symbol = :symbol AND strategy = :strategy AND status = 'open'

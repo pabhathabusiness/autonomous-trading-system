@@ -19,8 +19,11 @@ from src.database import Database
 logger = logging.getLogger(__name__)
 
 # fixed paper notional per lane ($). Hail-Mary is fixed + never scaled (the cage).
-_NOTIONAL = {"runner": 2500.0, "bounce": 3000.0, "value": 4000.0, "hailmary": 1500.0}
+_NOTIONAL = {"runner": 2500.0, "bounce": 3000.0, "value": 4000.0, "hailmary": 1500.0,
+             "coiled": 2500.0, "special": 4000.0}
 _HAILMARY_MAX_OPEN = 2
+_DEEP_MAX_OPEN = 3          # A3 Part 2: deep tier ($0.20-1) fixed tiny notional, max 3 open
+_DEEP_NOTIONAL = 800.0
 # lane stop floor (fraction below entry) when structure is unavailable
 _STOP_PCT = {"runner": 0.08, "bounce": 0.07, "value": 0.15, "hailmary": 0.15}
 
@@ -57,22 +60,34 @@ def open_smallcap_trigger(db: Database, trigger: dict[str, Any],
         logger.info("hailmary cage full (%d open) -- skipping %s",
                     _HAILMARY_MAX_OPEN, trigger.get("symbol"))
         return None
+    # A3 Part 2: deep tier ($0.20-1) is caged at max 3 open across the whole tier.
+    if trigger.get("price_tier") == "deep":
+        deep_open = sum(1 for t in db.get_smallcap_trades(status="open")
+                        if (t.get("price_tier") == "deep"))
+        if deep_open >= _DEEP_MAX_OPEN:
+            logger.info("deep-tier cage full (%d open) -- skipping %s", _DEEP_MAX_OPEN, trigger.get("symbol"))
+            return None
     entry, stop, target = _levels(trigger)
     if entry <= 0 or stop <= 0 or target <= entry:
         return None
-    notional = (((config or {}).get("smallcap", {}) or {}).get("notional", {}) or {}).get(
-        lane, _NOTIONAL.get(lane, 2500.0))
+    if trigger.get("price_tier") == "deep":
+        notional = _DEEP_NOTIONAL            # fixed tiny, never scaled
+    else:
+        notional = (((config or {}).get("smallcap", {}) or {}).get("notional", {}) or {}).get(
+            lane, _NOTIONAL.get(lane, 2500.0))
     shares = round(notional / entry, 2) if entry > 0 else 0
-    tj = {k: trigger.get(k) for k in ("lane", "score", "band", "reasons", "chips",
-                                      "catalyst", "demand_signals", "components",
-                                      "float_tier", "float_shares", "rel_vol", "caged")}
+    tj = {k: trigger.get(k) for k in ("lane", "composite_score", "band", "reasons", "chips",
+                                      "catalyst", "families", "families_fired", "coiled_state",
+                                      "float_tier", "float_est", "float_shares", "rel_vol")}
     return db.open_paper_trade({
         "symbol": trigger["symbol"], "strategy": lane, "direction": "long",
         "sector_name": trigger.get("sector_name"),
         "entry_price": entry, "stop_loss": stop, "target_price": target,
         "expected_timeframe": trigger.get("band"), "max_hold_days": trigger.get("time_stop_days", 5),
         "book": "smallcap", "source": "smallcap", "lane": lane,
-        "lane_score": trigger.get("score"), "trigger_json": json.dumps(tj),
+        "lane_score": trigger.get("score"), "composite_score": trigger.get("composite_score"),
+        "price_tier": trigger.get("price_tier"), "hold_band": trigger.get("band"),
+        "trigger_json": json.dumps(tj),
         "shares": shares, "position_value": round(shares * entry, 2),
         "planned_rr": trigger.get("rr_floor"),
         "process_grade": None,   # small-caps use per-lane stats, not the A-F grade

@@ -342,9 +342,34 @@ table.livebook td { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .mtf-bias { font-size: 13px; font-weight: 700; }
 .mtf-tags { display: flex; gap: 6px; flex-wrap: wrap; font-size: 11px; }
 .mtf-tag { background: rgba(124,58,237,0.16); color: var(--grade); padding: 2px 7px; border-radius: 5px; font-weight: 700; }
+.mtf-row.role-watch { border-style: dashed; }
+.mtf-row.role-context { opacity: .82; }
+.mtf-bands { flex-basis: 100%; font-size: 10.5px; letter-spacing: .02em; }
+/* compression grade: only tight/extreme are "armed", mild stays grey so a
+   narrowing chart never reads as a setup */
+.mtf-tag.sq-extreme { background: rgba(241,196,15,0.18); color: var(--yellow); }
+.mtf-tag.sq-tight { background: rgba(52,152,219,0.18); color: var(--blue); }
+.mtf-tag.sq-mild { background: rgba(255,255,255,0.05); color: var(--muted); font-weight: 600; }
+.mtf-tag.tag-mid { background: rgba(255,255,255,0.05); }
+.mtf-tag.mid-bull { color: var(--green); }
+.mtf-tag.mid-bear { color: var(--red); }
+
+/* higher-timeframe watch: computed, then waited on -- never an entry */
+.tf-watch { margin-top: 12px; border: 1px dashed var(--border); border-radius: 10px; padding: 10px 12px; }
+.tf-watch.wt-armed { border-color: rgba(241,196,15,0.5); background: rgba(241,196,15,0.05); }
+.tf-watch.wt-up { border-color: rgba(46,204,113,0.5); background: rgba(46,204,113,0.05); }
+.tf-watch.wt-down { border-color: rgba(231,76,60,0.5); background: rgba(231,76,60,0.05); }
+.wt-head { font-size: 12.5px; font-weight: 700; }
+.wt-levels { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 6px; font-size: 11.5px; font-weight: 700; }
+.wt-l { color: var(--muted); }
+.wt-l.wt-mid { color: var(--text); }
+.wt-note { margin-top: 6px; font-size: 11.5px; line-height: 1.45; }
+
 .drill-plan { margin-top: 12px; border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
 .drill-plan.plan-long { border-color: rgba(46,204,113,0.45); }
 .drill-plan.plan-short { border-color: rgba(231,76,60,0.45); }
+.drill-plan.plan-conflict { border-style: dashed; }
+.dp-caveat { margin-top: 8px; font-size: 11.5px; font-weight: 700; color: var(--yellow); }
 .dp-head { font-size: 13px; }
 
 /* journal table */

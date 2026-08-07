@@ -116,16 +116,83 @@ def macd(closes: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> 
     return {"signal": state, "histogram": float(m_now - s_now)}
 
 
-def bollinger_bands(closes: pd.Series, period: int = 20, num_std: float = 2.0) -> dict[str, Any]:
-    mean = closes.rolling(period).mean()
+def true_range(df: pd.DataFrame) -> pd.Series:
+    """Wilder's true range -- the per-bar building block for ATR/Keltner."""
+    prev_close = df["Close"].shift(1)
+    spans = pd.concat([df["High"] - df["Low"],
+                       (df["High"] - prev_close).abs(),
+                       (df["Low"] - prev_close).abs()], axis=1)
+    return spans.max(axis=1)
+
+
+def atr_series(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """ATR as a series (Wilder smoothing) -- callers that only want the last
+    value should use `atr`."""
+    return true_range(df).ewm(alpha=1.0 / period, adjust=False).mean()
+
+
+def atr(df: pd.DataFrame, period: int = 14) -> Optional[float]:
+    series = atr_series(df, period).dropna()
+    return float(series.iloc[-1]) if len(series) else None
+
+
+def bollinger_series(closes: pd.Series, period: int = 20,
+                     num_std: float = 2.0) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """(upper, middle, lower) Bollinger bands as full series."""
+    middle = closes.rolling(period).mean()
     std = closes.rolling(period).std()
-    upper = mean + num_std * std
-    lower = mean - num_std * std
+    return middle + num_std * std, middle, middle - num_std * std
+
+
+def keltner_series(df: pd.DataFrame, period: int = 20, atr_mult: float = 1.5,
+                   atr_period: int = 20) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """(upper, middle, lower) Keltner channels -- an EMA basis with ATR bands.
+
+    Pairing these with Bollinger bands is what makes a squeeze measurable: BB
+    width is standard-deviation-driven, Keltner width is range-driven, so
+    Bollinger bands contracting INSIDE Keltner means realised volatility has
+    collapsed relative to the recent trading range (the TTM squeeze).
+    """
+    middle = df["Close"].ewm(span=period, adjust=False).mean()
+    band = atr_series(df, atr_period) * atr_mult
+    return middle + band, middle, middle - band
+
+
+def bandwidth_series(closes: pd.Series, period: int = 20,
+                     num_std: float = 2.0) -> pd.Series:
+    """Bollinger bandwidth: band span as a fraction of the basis. Normalised by
+    the basis so it is comparable across symbols and price levels."""
+    upper, middle, lower = bollinger_series(closes, period, num_std)
+    return (upper - lower) / middle.replace(0, np.nan)
+
+
+def percentile_rank(series: pd.Series, value: float) -> Optional[float]:
+    """Share of `series` (0-100) sitting strictly below `value`."""
+    clean = series.dropna()
+    if len(clean) < 2 or pd.isna(value):
+        return None
+    return float((clean < value).mean() * 100.0)
+
+
+def bollinger_bands(closes: pd.Series, period: int = 20, num_std: float = 2.0,
+                    squeeze_lookback: int = 250,
+                    squeeze_pctile: float = 10.0) -> dict[str, Any]:
+    """Bollinger read including the basis (middle band) and a bandwidth
+    PERCENTILE rank rather than a crude quartile test.
+
+    The old test flagged a squeeze whenever width sat in the lowest quartile of
+    60 bars -- true ~25% of the time by construction, so it tagged ordinary
+    quiet as compression. Ranking current bandwidth against `squeeze_lookback`
+    bars and demanding the lowest `squeeze_pctile`% makes the flag mean
+    "unusually compressed for THIS name" instead of merely "below average".
+    """
+    upper, middle, lower = bollinger_series(closes, period, num_std)
     last_close = closes.iloc[-1]
-    last_upper, last_lower, last_mean = upper.iloc[-1], lower.iloc[-1], mean.iloc[-1]
+    last_upper, last_lower, last_mean = upper.iloc[-1], lower.iloc[-1], middle.iloc[-1]
     if pd.isna(last_upper) or pd.isna(last_lower) or last_upper == last_lower:
         return {"percent_b": 0.5, "position": "MIDDLE", "upper": None, "lower": None,
-                "breakout": False, "squeeze": False}
+                "middle": None, "breakout": False, "breakdown": False, "squeeze": False,
+                "bandwidth": None, "bandwidth_pctile": None, "squeeze_bars": 0}
     percent_b = (last_close - last_lower) / (last_upper - last_lower)
     if percent_b <= 0.15:
         position = "NEAR_LOWER"
@@ -133,14 +200,37 @@ def bollinger_bands(closes: pd.Series, period: int = 20, num_std: float = 2.0) -
         position = "NEAR_UPPER"
     else:
         position = "MIDDLE"
-    # bandwidth squeeze: current width in the lowest quartile of the last 60 bars
-    width = (upper - lower) / mean.replace(0, np.nan)
-    recent_width = width.tail(60).dropna()
-    squeeze = bool(len(recent_width) > 10 and width.iloc[-1] <= recent_width.quantile(0.25))
-    breakout = bool(last_close > last_upper)
+
+    width = (upper - lower) / middle.replace(0, np.nan)
+    current_width = width.iloc[-1]
+    history = width.tail(squeeze_lookback)
+    pctile = percentile_rank(history, current_width)
+    # enough history to rank against, and tighter than all but `squeeze_pctile`%
+    enough = history.dropna().shape[0] >= max(20, period)
+    squeeze = bool(enough and pctile is not None and pctile <= squeeze_pctile)
+
+    # How long the compression has been running -- a coil is not a single quiet
+    # bar. Judged against one threshold taken from the lookback window, not a
+    # rolling one: a rolling threshold sinks as the coil's own bars fill the low
+    # end of the window, which resets the count on exactly the long coils that
+    # matter most. `src.compression` measures this off BB-inside-Keltner, which
+    # is steadier still.
+    squeeze_bars = 0
+    if pd.notna(threshold := history.quantile(squeeze_pctile / 100.0)):
+        for value in reversed(width.tolist()):
+            if pd.isna(value) or value > threshold:
+                break
+            squeeze_bars += 1
+
     return {"percent_b": float(percent_b), "position": position,
             "upper": float(last_upper), "lower": float(last_lower),
-            "breakout": breakout, "squeeze": squeeze}
+            "middle": float(last_mean) if pd.notna(last_mean) else None,
+            "breakout": bool(last_close > last_upper),
+            "breakdown": bool(last_close < last_lower),
+            "squeeze": squeeze,
+            "bandwidth": float(current_width) if pd.notna(current_width) else None,
+            "bandwidth_pctile": round(pctile, 1) if pctile is not None else None,
+            "squeeze_bars": int(squeeze_bars)}
 
 
 def find_pivots(df: pd.DataFrame, order: int = 3) -> tuple[list[Pivot], list[Pivot]]:

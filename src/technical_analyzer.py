@@ -26,7 +26,7 @@ from typing import Any, Optional
 import pandas as pd
 import yfinance as yf
 
-from src import chart_patterns, indicators
+from src import chart_patterns, compression, indicators
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +90,8 @@ class TechnicalAnalyzer:
         self.pivot_order = tcfg.get("pivot_lookback", 3)
         self.bb_period = tcfg.get("bollinger_period", 20)
         self.bb_std = tcfg.get("bollinger_std", 2.0)
+        # thresholds for what counts as UNUSUAL compression (src/compression.py)
+        self.comp = compression.settings_from_config(config)
         self.macd_fast = tcfg.get("macd_fast", 12)
         self.macd_slow = tcfg.get("macd_slow", 26)
         self.macd_signal = tcfg.get("macd_signal", 9)
@@ -200,16 +202,32 @@ class TechnicalAnalyzer:
             f"MFI {mfi_d:.0f} ({'money flowing in' if mfi_d >= 50 else 'washed-out'})")
 
         # --- VOLATILITY / COMPRESSION ------------------------------------
-        bb = indicators.bollinger_bands(closes, self.bb_period, self.bb_std)
-        sig("volatility", "squeeze", bool(bb["squeeze"]), 1.0, "Bollinger squeeze (coiling)")
+        # The whole Bollinger family lives under this ONE capped dimension --
+        # compression, band position and the basis are three views of the same
+        # instrument, so they should not be able to out-vote structure or volume
+        # between them.
+        bb = indicators.bollinger_bands(closes, self.bb_period, self.bb_std,
+                                        self.comp.lookback, self.comp.tight_pctile)
+        comp = compression.analyze(daily, self.comp)
+        # Only UNUSUAL compression counts. The old test (lowest quartile of 60
+        # bars) fired roughly a quarter of the time by construction, which made
+        # "squeeze" a near-free point rather than an edge.
+        unusual = bool(comp and comp["unusual"])
+        sig("volatility", "squeeze", unusual, 1.0,
+            comp["label"] if comp else "no compression read")
         sig("volatility", "bb_position", bb["position"] == "NEAR_LOWER", 0.6,
             "price near lower band (reversion long)")
         # compression is a TIMING signal -- direction comes from which pivot it
         # resolves against. A squeeze resolving UP through the upper band = a
         # long-side timing trigger.
-        compression_up = bool(bb["squeeze"] and bb["breakout"])
+        compression_up = bool(unusual and comp["break_up"])
         sig("volatility", "compression_resolve_up", compression_up, 0.6,
             "squeeze resolving up through band")
+        # the basis (middle band) doubles as the short-term trend line: holding
+        # above a RISING basis is the bias that supports a long
+        mid = (comp or {}).get("mid") or {}
+        sig("volatility", "basis_bias", mid.get("bias") == "bullish", 0.5,
+            mid.get("note") or "no basis read")
 
         # --- VOLUME ------------------------------------------------------
         avg_vol = daily["Volume"].rolling(20).mean().iloc[-1]
@@ -324,7 +342,7 @@ class TechnicalAnalyzer:
         dim_scores, quality, fired_names, num_edges = _aggregate_dims(dims)
         confidence = self._tier(num_edges, quality)
 
-        compression_tf = "daily" if bb["squeeze"] else None
+        compression_tf = "daily" if unusual else None
         compression_dir = "up" if compression_up else None
         archetype = self._classify_archetype(daily_bias, weekly_bias, near_demand,
                                               bb, patterns, compression_dir, "long")
@@ -371,6 +389,7 @@ class TechnicalAnalyzer:
                 "dimensions": dims,
                 "dim_scores": dim_scores,
                 "bb_percent_b": bb["percent_b"],
+                "compression": comp,
                 "macd_histogram": macd_d["histogram"],
                 "roc10": roc10,
                 "mfi": round(mfi_d, 2),
@@ -453,12 +472,26 @@ class TechnicalAnalyzer:
         macd_4h_bull = macd_4h["signal"] in ("BULLISH", "BULLISH_CROSSOVER")
 
         # --- VOLATILITY / COMPRESSION (the timing energy) ----------------
-        bb_d = indicators.bollinger_bands(closes, self.bb_period, self.bb_std)
-        bb4 = indicators.bollinger_bands(four_h["Close"]) if len(four_h) > 25 else {"position": "MIDDLE", "squeeze": False, "breakout": False}
-        squeeze = bool(bb_d["squeeze"] or bb4.get("squeeze"))
-        sig("volatility", "bb_squeeze", squeeze, 1.2, "Bollinger compression")
-        compression_up = bool(squeeze and (bb_d.get("breakout") or bb4.get("breakout")))
-        sig("volatility", "compression_resolve_up", compression_up, 0.8, "squeeze resolving up")
+        # Daily supplies the coil; 4h is COMPUTED AS A WATCH rather than as an
+        # entry -- armed means "waiting on a band break", and only the break
+        # itself resolves direction. A 4h coil is too slow to time an entry off,
+        # but it is what says whether the eventual move has fuel behind it.
+        bb_d = indicators.bollinger_bands(closes, self.bb_period, self.bb_std,
+                                          self.comp.lookback, self.comp.tight_pctile)
+        comp_d = compression.analyze(daily, self.comp)
+        watch_4h = compression.watch(four_h, self.comp, "4h")
+        armed_4h = bool(watch_4h and watch_4h["state"] == "armed")
+        broke_4h_up = bool(watch_4h and watch_4h["state"] == "triggered_up")
+        squeeze = bool((comp_d and comp_d["unusual"]) or armed_4h)
+        sig("volatility", "bb_squeeze", squeeze, 1.2,
+            (watch_4h or {}).get("note") if armed_4h
+            else (comp_d["label"] if comp_d else "Bollinger compression"))
+        compression_up = bool(squeeze and ((comp_d and comp_d["break_up"]) or broke_4h_up))
+        sig("volatility", "compression_resolve_up", compression_up, 0.8,
+            "4h broke the upper band" if broke_4h_up else "squeeze resolving up")
+        mid_d = (comp_d or {}).get("mid") or {}
+        sig("volatility", "basis_bias", mid_d.get("bias") == "bullish", 0.5,
+            mid_d.get("note") or "no basis read")
 
         # --- MOMENTUM: 4h MACD (cross weighted highest) + EMAs + MFI -----
         sig("momentum", "macd_4h", macd_4h_bull,
@@ -546,7 +579,7 @@ class TechnicalAnalyzer:
             "daily_bias": daily_bias,
             "weekly_bias": f"4h {macd_4h['signal']}",
             "macd_signal": macd_4h["signal"],
-            "bb_position": bb4.get("position", "MIDDLE"),
+            "bb_position": (watch_4h or {}).get("position") or bb_d["position"],
             "rsi": round(mfi_d, 2),          # schema-compat key; now carries MFI
             "mfi": round(mfi_d, 2),
             "rs_vs_spy": rs20,
@@ -595,15 +628,19 @@ class TechnicalAnalyzer:
             {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
         ).dropna() if not monthly.empty else monthly
 
+        # Ranking bandwidth by percentile needs a sample to rank against: the
+        # band needs `period` bars before it produces a width at all, plus ~20
+        # widths to rank. Below that the honest answer is None ("can't judge"),
+        # not False -- so these minimums track the percentile requirement.
         def squeeze_on(df, period, min_bars):
-            if df is None or len(df) < min_bars:
+            if df is None or len(df) < max(min_bars, period + 20):
                 return None  # not enough history to judge
             return bool(indicators.bollinger_bands(df["Close"], period, self.bb_std)["squeeze"])
 
         sq_daily = bool(bb["squeeze"])
         sq_weekly = squeeze_on(weekly, self.bb_period, 40)
-        sq_monthly = squeeze_on(monthly, 10, 24)      # ~2yr+ of monthly bars
-        sq_quarterly = squeeze_on(quarterly, 8, 14)   # ~3.5yr+ of quarterly bars
+        sq_monthly = squeeze_on(monthly, 10, 30)      # ~2.5yr+ of monthly bars
+        sq_quarterly = squeeze_on(quarterly, 8, 28)   # ~7yr+ of quarterly bars
 
         add("monthly_squeeze", bool(sq_monthly), 3.0, 3.0, "monthly Bollinger compression")
         add("quarterly_squeeze", bool(sq_quarterly), 2.5, 2.5, "quarterly compression (multi-yr base)")
@@ -783,13 +820,20 @@ class TechnicalAnalyzer:
             f"MFI {mfi_d:.0f} ({'overbought' if mfi_d > 80 else 'weak'})")
 
         # --- VOLATILITY: breakdown / rejection at upper band ------------
-        bb = indicators.bollinger_bands(closes, self.bb_period, self.bb_std)
+        bb = indicators.bollinger_bands(closes, self.bb_period, self.bb_std,
+                                        self.comp.lookback, self.comp.tight_pctile)
+        comp = compression.analyze(daily, self.comp)
+        unusual = bool(comp and comp["unusual"])
         below_lower = bool(bb["lower"] and price < bb["lower"])
-        sig("volatility", "bollinger_breakdown", below_lower or bb["squeeze"], 1.0,
-            "broke lower band" if below_lower else "squeeze")
+        sig("volatility", "bollinger_breakdown", below_lower or unusual, 1.0,
+            "broke lower band" if below_lower else (comp["label"] if comp else "squeeze"))
         sig("volatility", "bollinger_rejection", bb["position"] == "NEAR_UPPER", 0.6, "rejected at upper band")
-        compression_down = bool(bb["squeeze"] and below_lower)
+        compression_down = bool(unusual and below_lower)
         sig("volatility", "compression_resolve_down", compression_down, 0.6, "squeeze resolving down")
+        # mirror of the long side: under a FALLING basis is the bearish bias
+        mid = (comp or {}).get("mid") or {}
+        sig("volatility", "basis_bias_down", mid.get("bias") == "bearish", 0.5,
+            mid.get("note") or "no basis read")
 
         # --- VOLUME: distribution (down-volume dominating) ---------------
         avg_vol = daily["Volume"].rolling(20).mean().iloc[-1]
@@ -841,7 +885,7 @@ class TechnicalAnalyzer:
         dim_scores, quality, fired, num_edges = _aggregate_dims(dims)
         # for a short, the pivot we lean on is the supply zone (resistance)
         near_supply = bool(resistance and (resistance - price) / price <= 0.06)
-        compression_tf = "daily" if bb["squeeze"] else None
+        compression_tf = "daily" if unusual else None
         compression_dir = "down" if compression_down else None
         archetype = self._classify_archetype(daily_bias, weekly_bias, near_supply,
                                               bb, [], compression_dir, "short")

@@ -817,37 +817,89 @@ function openBias(sym) {
 }
 
 // #8 MAG-7 drill-down: bias per timeframe + a trade plan only when the real
-// (compression + MACD-cross + pivot) confluence is there.
+// confluence is there. Compression arms entries on 15m/30m/1h ONLY, and only
+// the unusual kind; 4h is computed as a band-break watch, never as an entry.
 const MTF_ORDER = ["15m", "30m", "1h", "4h", "daily"];
+const midChip = (bias) => bias && bias !== 'neutral'
+  ? `<span class="mtf-tag tag-mid ${bias === 'bullish' ? 'mid-bull' : 'mid-bear'}">basis ${bias}</span>` : '';
+
+const ordinal = (n) => {
+  const i = Math.round(n), rem100 = i % 100;
+  if (rem100 >= 11 && rem100 <= 13) return `${i}th`;
+  return i + (["th", "st", "nd", "rd"][i % 10] || "th");
+};
+
+function compressionChip(r, isWatchTf) {
+  const c = r.compression;
+  if (!c || c.grade === 'none') return isWatchTf ? '' : '<span class="muted">no compression</span>';
+  // only tight/extreme arm anything -- mild is shown greyed so you can see it
+  // narrowing without mistaking it for a setup
+  const armed = c.unusual;
+  const cls = armed ? (c.grade === 'extreme' ? 'sq-extreme' : 'sq-tight') : 'sq-mild';
+  const bits = [`${c.grade}`];
+  if (c.bandwidth_pctile != null) bits.push(`BBW ${ordinal(c.bandwidth_pctile)}`);
+  if (c.bars_in_squeeze) bits.push(`${c.bars_in_squeeze} bars`);
+  if (c.ttm_squeeze) bits.push('in Keltner');
+  // 🔒 = armed to ENTER (15m/30m/1h only); 👁 = watch-only frame, never an entry
+  const mark = armed ? (isWatchTf ? '👁 ' : '🔒 ') : '';
+  return `<span class="mtf-tag ${cls}">${mark}${bits.join(' · ')}</span>`;
+}
+
 async function loadDrilldown(sym) {
   const el = $("drill-body"); if (!el) return;
   try {
     const d = await fetchJSON(`/api/drilldown/${encodeURIComponent(sym)}`);
     const tfs = d.timeframes || {};
+    const watchTf = d.watch_tf || "4h";
+    const armTfs = d.compression_tfs || ["15m", "30m", "1h"];
     const rows = MTF_ORDER.filter(tf => tfs[tf]).map(tf => {
       const r = tfs[tf];
       const cls = r.bias === 'Bullish' ? 'pos' : r.bias === 'Bearish' ? 'neg' : 'muted';
-      const tags = (r.squeeze ? '<span class="mtf-tag">squeeze</span>' : '') +
-        (r.macd_cross ? `<span class="mtf-tag">MACD ${r.macd_dir}-cross</span>` : `<span class="muted">MACD ${(r.macd || '').toLowerCase()}</span>`);
-      return `<div class="mtf-row"><span class="mtf-tf">${tf}</span>
-        <span class="mtf-bias ${cls}">${r.bias}</span><span class="mtf-tags">${tags}</span></div>`;
+      const role = armTfs.includes(tf) ? '' : tf === watchTf ? ' role-watch' : ' role-context';
+      const tags = compressionChip(r, tf === watchTf) +
+        (r.macd_cross ? `<span class="mtf-tag">MACD ${r.macd_dir}-cross</span>` : `<span class="muted">MACD ${(r.macd || '').toLowerCase()}</span>`) +
+        midChip(r.mid_bias);
+      const bands = r.bands
+        ? `<div class="mtf-bands muted">${num(r.bands.lower, 2)} · <strong>${num(r.bands.middle, 2)}</strong> · ${num(r.bands.upper, 2)}</div>`
+        : '';
+      return `<div class="mtf-row${role}"><span class="mtf-tf">${tf}</span>
+        <span class="mtf-bias ${cls}">${r.bias}</span>
+        <span class="mtf-tags">${tags}${bands}</span></div>`;
     }).join("");
+
+    // the 4h watch: computed, then held as a trigger to wait for
+    let watch = '';
+    if (d.watch) {
+      const w = d.watch;
+      const state = { armed: 'wt-armed', triggered_up: 'wt-up', triggered_down: 'wt-down' }[w.state] || 'wt-idle';
+      const label = { armed: 'ARMED', triggered_up: 'BROKE UP', triggered_down: 'BROKE DOWN', coiling: 'narrowing', idle: 'idle' }[w.state] || w.state;
+      watch = `<div class="tf-watch ${state}">
+        <div class="wt-head">${watchTf} watch · <strong>${label}</strong>${w.lean ? ` <span class="muted">(basis leans ${w.lean})</span>` : ''}</div>
+        <div class="wt-levels"><span class="wt-l">▲ upper ${num(w.upper, 2)}</span>
+          <span class="wt-l wt-mid">basis ${num(w.middle, 2)}</span>
+          <span class="wt-l">▼ lower ${num(w.lower, 2)}</span></div>
+        <div class="muted wt-note">${w.note}</div></div>`;
+    }
+
     let plan;
     if (d.plan) {
       const p = d.plan;
-      plan = `<div class="drill-plan ${p.direction === 'long' ? 'plan-long' : 'plan-short'}">
-        <div class="dp-head">Trade plan · <strong>${p.direction.toUpperCase()}</strong> <span class="muted">(${p.trigger_tf} trigger)</span></div>
+      const caveats = (p.caveats && p.caveats.length)
+        ? `<div class="dp-caveat">⚠ conflicted — ${p.caveats.join('; ')}</div>` : '';
+      plan = `<div class="drill-plan ${p.direction === 'long' ? 'plan-long' : 'plan-short'}${p.conflicted ? ' plan-conflict' : ''}">
+        <div class="dp-head">Trade plan · <strong>${p.direction.toUpperCase()}</strong> <span class="muted">(${p.trigger_tf} trigger · ${p.compression_grade} compression)</span></div>
         <div class="plan3" style="margin-top:8px">
           <div class="p p-e"><div class="l">Entry</div><div class="v">${price(p.entry)}</div></div>
           <div class="p p-s"><div class="l">Stop</div><div class="v">${price(p.stop)}</div></div>
           <div class="p p-t"><div class="l">Target</div><div class="v">${price(p.target)}</div></div>
         </div>
+        ${caveats}
         <div class="muted" style="margin-top:8px">R:R ${num(p.risk_reward, 1)}:1 · ${p.note}</div></div>`;
     } else {
-      plan = '<p class="muted" style="margin-top:10px">No trade plan — the compression + MACD-cross + pivot confluence isn\'t there right now. Bias only (no manufactured trade).</p>';
+      plan = `<p class="muted" style="margin-top:10px">No trade plan — needs <strong>unusual</strong> compression on ${armTfs.join(' / ')} plus a MACD cross and a pivot to trade against. Narrow bands alone don't count. Bias only (no manufactured trade).</p>`;
     }
     el.classList.remove("muted");
-    el.innerHTML = `<div class="mtf">${rows || '<p class="muted">no timeframe data</p>'}</div>${plan}` +
+    el.innerHTML = `<div class="mtf">${rows || '<p class="muted">no timeframe data</p>'}</div>${watch}${plan}` +
       (d.alpaca_enabled ? '' : '<p class="muted" style="margin-top:8px">Alpaca off — intraday timeframes may be limited.</p>');
   } catch (e) { el.innerHTML = `<p class="muted">${e.message}</p>`; }
 }

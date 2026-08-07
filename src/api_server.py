@@ -736,8 +736,9 @@ def scheduler_status() -> dict[str, Any]:
 @app.get("/api/drilldown/{symbol}")
 def get_drilldown(symbol: str) -> dict[str, Any]:
     """Timeframe-by-timeframe (15m/30m/1h/4h/daily) bias + a trade plan only when
-    the compression + MACD-cross + pivot confluence is genuinely there."""
-    return drilldown_module.build(ALPACA, symbol.upper())
+    the confluence is genuinely there: UNUSUAL compression on 15m/30m/1h, a MACD
+    cross, and a pivot. 4h is computed as a band-break watch, never as an entry."""
+    return drilldown_module.build(ALPACA, symbol.upper(), CONFIG)
 
 
 @app.get("/api/market-overview")

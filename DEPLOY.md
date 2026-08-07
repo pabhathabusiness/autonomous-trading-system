@@ -99,6 +99,37 @@ systemctl restart trading
 ```
 Your paper-trade history in `data/` is untouched by updates.
 
+> If `git pull` says "Your local changes would be overwritten", the server has
+> edits that never made it to GitHub. Don't blow them away blind — see what they
+> are first with `sudo -u trading git status` and `sudo -u trading git diff`.
+
+---
+
+## Tuning the compression thresholds (do this on the server)
+
+The system only acts on **unusual** Bollinger compression — bandwidth in the
+lowest decile of its own history, Bollinger bands inside Keltner, and held for
+several bars. Those thresholds live in `config.json` under
+`technical.compression`, and they should be measured rather than guessed:
+
+```bash
+cd /home/trading/autonomous-trading-system
+# daily bars, measure the 20 bars after each squeeze releases
+sudo -u trading .venv/bin/python tools/backtest_compression.py --timeframe 1d --horizon 20
+
+# the intraday frames that actually arm entries
+sudo -u trading .venv/bin/python tools/backtest_compression.py --timeframe 1h --period 2y --horizon 12
+sudo -u trading .venv/bin/python tools/backtest_compression.py --timeframe 15m --period 60d --horizon 26
+```
+
+Read the **LIFT** column: it compares each flavour of compression against the
+base rate of a big move on a random bar. A lift near 1.0 means that flavour is
+worth nothing, however tight the bands look. Take the tightest bucket that still
+has a usable sample (n ≥ ~100) and set `extreme_pctile` / `tight_pctile` /
+`min_squeeze_bars` / `require_keltner` to match, then `systemctl restart trading`.
+
+Add `--json /tmp/compression.json` to keep the full result.
+
 ## Handy checks
 - App logs: `journalctl -u trading -f`
 - Restart app: `systemctl restart trading`

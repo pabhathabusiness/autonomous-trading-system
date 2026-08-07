@@ -3,11 +3,26 @@ Per-symbol timeframe-by-timeframe drill-down (the MAG-7 expand view).
 
 Reads bias on 15m / 30m / 1h / 4h / daily (intraday from Alpaca, resampled for
 30m/4h, daily from yfinance) and surfaces a trade plan ONLY when a genuine setup
-exists -- Bollinger compression on 15m/30m/1h AND a MACD cross AND a pivot to
-trade against. Direction comes from the cross + which pivot it resolves against
-(bull cross holding above support -> long; bear cross failing at resistance ->
-short). No trade is manufactured for a name that doesn't have the confluence;
-bias is always shown, a plan only when it's really there.
+exists. The gate is deliberately narrow:
+
+  * COMPRESSION on 15m / 30m / 1h -- and only the unusual kind (see
+    src/compression.py: bandwidth in the lowest decile of its own history, BB
+    inside Keltner, and held for several bars). Ordinary narrow bands are not a
+    setup and no longer arm anything.
+  * A MACD CROSS on one of those same frames, which supplies the direction.
+  * A PIVOT to trade against, so the stop sits at structure rather than at a
+    round number.
+
+4h is computed but never used to *enter*: it is too slow to time an entry off,
+and its job here is to say how much fuel the move has. It is reported as a WATCH
+-- armed with the exact upper/lower band levels to break, or already triggered.
+The middle band (basis) on each frame supplies bias: price holding above a
+rising basis is a different trade from price bleeding under a falling one, and a
+plan that fights its own basis is flagged as conflicted rather than silently
+taken.
+
+No trade is manufactured for a name that doesn't have the confluence; bias is
+always shown, a plan only when it's really there.
 """
 
 from __future__ import annotations
@@ -17,10 +32,13 @@ from typing import Any, Optional
 import pandas as pd
 import yfinance as yf
 
-from src import indicators
+from src import compression, indicators
 
 _TFS = ["15m", "30m", "1h", "4h", "daily"]
-_INTRADAY = ("15m", "30m", "1h")
+# entry-timing frames: fast enough that a coil resolves inside a trade's life
+_COMPRESSION_TFS = ("15m", "30m", "1h")
+# context frame: computed, watched for a band break, never used to enter
+_WATCH_TF = "4h"
 
 
 def _resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
@@ -69,7 +87,8 @@ def _frames(alpaca, symbol: str) -> dict[str, pd.DataFrame]:
     return frames
 
 
-def _tf_read(df: Optional[pd.DataFrame]) -> Optional[dict[str, Any]]:
+def _tf_read(df: Optional[pd.DataFrame],
+             settings: compression.Settings) -> Optional[dict[str, Any]]:
     if df is None or len(df) < 30:
         return None
     closes = df["Close"]
@@ -79,32 +98,51 @@ def _tf_read(df: Optional[pd.DataFrame]) -> Optional[dict[str, Any]]:
     ema_up = bool(indicators.ema_alignment(closes, 9, 21, "up"))
     ema_dn = bool(indicators.ema_alignment(closes, 9, 21, "down"))
     macd = indicators.macd(closes)
-    bb = indicators.bollinger_bands(closes)
     sig = macd["signal"]
+    # compression needs a long history to rank against and returns None without
+    # it -- bias is still worth showing on a short frame, so this stays optional
+    comp = compression.analyze(df, settings)
     bull = struct == "BULLISH" or (ema_up and "BULL" in sig)
     bear = struct == "BEARISH" or (ema_dn and "BEAR" in sig)
     bias = "Bullish" if (bull and not bear) else "Bearish" if (bear and not bull) else "Neutral"
-    return {
+    read = {
         "bias": bias,
         "macd": sig,
         "macd_cross": sig in ("BULLISH_CROSSOVER", "BEARISH_CROSSOVER"),
         "macd_dir": "up" if "BULL" in sig else "down" if "BEAR" in sig else "flat",
-        "squeeze": bool(bb["squeeze"]),
+        # `squeeze` now means UNUSUAL compression, not merely narrow bands
+        "squeeze": bool(comp and comp["unusual"]),
         "support": indicators.nearest_level(pl, price, "below"),
         "resistance": indicators.nearest_level(ph, price, "above"),
         "price": round(price, 2),
     }
+    if comp:
+        read.update({
+            "compression": {
+                "grade": comp["grade"], "unusual": comp["unusual"],
+                "bandwidth_pctile": comp["bandwidth_pctile"],
+                "bars_in_squeeze": comp["bars_in_squeeze"],
+                "ttm_squeeze": comp["ttm_squeeze"], "label": comp["label"],
+            },
+            "bands": {"upper": comp["upper"], "middle": comp["middle"], "lower": comp["lower"]},
+            "mid_bias": comp["mid"]["bias"],
+            "mid_note": comp["mid"]["note"],
+            "percent_b": comp["percent_b"],
+        })
+    return read
 
 
-def _plan(reads: dict[str, dict[str, Any]]) -> Optional[dict[str, Any]]:
+def _plan(reads: dict[str, dict[str, Any]],
+          watch: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
     """A plan only when the confluence is genuinely there."""
-    # 1) compression on an intraday timeframe
-    compressed = [tf for tf in _INTRADAY if reads.get(tf) and reads[tf]["squeeze"]]
+    # 1) UNUSUAL compression on an entry-timing frame (15m/30m/1h)
+    compressed = [tf for tf in _COMPRESSION_TFS if reads.get(tf) and reads[tf]["squeeze"]]
     if not compressed:
         return None
-    # 2) a MACD cross on an intraday timeframe, with a direction
-    trigger = next((tf for tf in _INTRADAY
-                    if reads.get(tf) and reads[tf]["macd_cross"] and reads[tf]["macd_dir"] in ("up", "down")), None)
+    # 2) a MACD cross on an entry-timing frame, with a direction
+    trigger = next((tf for tf in _COMPRESSION_TFS
+                    if reads.get(tf) and reads[tf]["macd_cross"]
+                    and reads[tf]["macd_dir"] in ("up", "down")), None)
     if not trigger:
         return None
     r = reads[trigger]
@@ -125,18 +163,48 @@ def _plan(reads: dict[str, dict[str, Any]]) -> Optional[dict[str, Any]]:
         target = round(r["support"] or price * 0.97, 2)
     risk, reward = abs(entry - stop), abs(target - entry)
     rr = round(reward / risk, 2) if risk > 0 else 0.0
+
+    # 4) basis + 4h context. Neither can create a trade; both can qualify one.
+    wanted = "bullish" if direction == "long" else "bearish"
+    mid_bias = r.get("mid_bias")
+    mid_aligned = mid_bias == wanted
+    mid_conflict = bool(mid_bias and mid_bias != "neutral" and mid_bias != wanted)
+    htf_lean = (watch or {}).get("lean")
+    htf_conflict = bool(htf_lean and htf_lean != direction)
+
+    grade = (r.get("compression") or {}).get("grade", "unusual")
+    bars = (r.get("compression") or {}).get("bars_in_squeeze")
+    note = (f"{'; '.join(compressed)} {grade} compression"
+            + (f" ({bars} bars)" if bars else "")
+            + f" + {trigger} MACD {r['macd_dir']}-cross, {direction} against pivot {round(pivot, 2)}")
+    if r.get("mid_note"):
+        note += f"; basis {r['mid_note']}"
+
+    caveats = []
+    if mid_conflict:
+        caveats.append(f"basis bias is {mid_bias} against a {direction}")
+    if htf_conflict:
+        caveats.append(f"4h leans {htf_lean}")
+
     return {
         "direction": direction, "trigger_tf": trigger, "compressed_tfs": compressed,
+        "compression_grade": grade,
         "entry": round(entry, 2), "stop": stop, "target": target, "risk_reward": rr,
         "pivot": round(pivot, 2),
-        "note": (f"{'; '.join(compressed)} compression + {trigger} MACD {r['macd_dir']}-cross, "
-                 f"{direction} against pivot {round(pivot, 2)}"),
+        "mid_bias": mid_bias, "mid_aligned": mid_aligned,
+        "htf_lean": htf_lean, "conflicted": bool(caveats),
+        "caveats": caveats,
+        "note": note,
     }
 
 
-def build(alpaca, symbol: str) -> dict[str, Any]:
+def build(alpaca, symbol: str, config: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    settings = compression.settings_from_config(config or {})
     frames = _frames(alpaca, symbol)
-    reads = {tf: _tf_read(frames.get(tf)) for tf in _TFS}
+    reads = {tf: _tf_read(frames.get(tf), settings) for tf in _TFS}
     reads = {tf: r for tf, r in reads.items() if r}
-    return {"symbol": symbol, "timeframes": reads, "plan": _plan(reads),
+    watch = compression.watch(frames.get(_WATCH_TF), settings, _WATCH_TF)
+    return {"symbol": symbol, "timeframes": reads,
+            "watch": watch, "plan": _plan(reads, watch),
+            "compression_tfs": list(_COMPRESSION_TFS), "watch_tf": _WATCH_TF,
             "alpaca_enabled": bool(getattr(alpaca, "enabled", False))}

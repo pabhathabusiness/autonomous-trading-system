@@ -92,6 +92,19 @@
     "default_target_pct": 0.15,
     "target_resistance_source": "weekly",
     "buying_pressure_lookback": 10,
+    "compression": {
+      "_note": "What counts as UNUSUAL Bollinger compression -- the kind that precedes a real expansion, not merely narrow bands. A squeeze must clear the bandwidth percentile AND (by default) the BB-inside-Keltner test AND the duration floor. Tune these from tools/backtest_compression.py rather than by feel.",
+      "lookback_bars": 250,
+      "min_rank_bars": 60,
+      "keltner_atr_mult": 1.5,
+      "extreme_pctile": 5.0,
+      "tight_pctile": 10.0,
+      "mild_pctile": 20.0,
+      "min_squeeze_bars": 3,
+      "require_keltner": true,
+      "mid_slope_bars": 5,
+      "mid_test_bars": 6
+    },
     "short_term": {
       "min_stop_pct": 0.025,
       "target_pct": 0.06,

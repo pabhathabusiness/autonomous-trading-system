@@ -8,7 +8,6 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
-import numpy as np
 import pandas as pd
 import yfinance as yf
 
@@ -21,10 +20,17 @@ def _rsi(closes: pd.Series, period: int = 14) -> float:
     loss = -delta.clip(upper=0)
     avg_gain = gain.rolling(period).mean()
     avg_loss = loss.rolling(period).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    value = rsi.iloc[-1]
-    return float(value) if pd.notna(value) else 50.0
+    last_gain, last_loss = avg_gain.iloc[-1], avg_loss.iloc[-1]
+    if pd.isna(last_gain) or pd.isna(last_loss):
+        return 50.0
+    if last_loss == 0:
+        # No down bars in the window at all -- maximally overbought, not
+        # "no signal". A straight avg_gain/0 division would go to NaN here
+        # and get mistaken for missing data instead of the strongest
+        # possible reading, hiding OVERBOUGHT during the sharpest rallies.
+        return 100.0 if last_gain > 0 else 50.0
+    rs = last_gain / last_loss
+    return float(100 - (100 / (1 + rs)))
 
 
 def _pct_change(closes: pd.Series, periods: int) -> Optional[float]:
@@ -37,21 +43,38 @@ def _pct_change(closes: pd.Series, periods: int) -> Optional[float]:
     return float((end - start) / start * 100)
 
 
+_DEFAULT_WEIGHTS = {"1d": 0.15, "5d": 0.30, "10d": 0.30, "30d": 0.25}
+
+
 class MarketAnalyzer:
     """Detects overall market regime from a benchmark symbol (default SPY)."""
 
-    def __init__(self, config: dict[str, Any]):
+    def __init__(self, config: dict[str, Any], alpaca=None):
         mcfg = config.get("market_regime", {})
         self.symbol = mcfg.get("symbol", "SPY")
         self.overbought_rsi = mcfg.get("overbought_rsi", 70)
         self.oversold_rsi = mcfg.get("oversold_rsi", 30)
         self.bull_threshold = mcfg.get("bull_threshold_pct", 2.0)
         self.bear_threshold = mcfg.get("bear_threshold_pct", -2.0)
-        # recent timeframes matter more than distant ones
-        self.weights = mcfg.get("trend_weights", {"1d": 0.15, "5d": 0.30, "10d": 0.30, "30d": 0.25})
+        # recent timeframes matter more than distant ones. Merged with the
+        # defaults (not replaced) so a config that only overrides one weight
+        # doesn't KeyError on the others at composite-score time.
+        self.weights = {**_DEFAULT_WEIGHTS, **mcfg.get("trend_weights", {})}
+        self.alpaca = alpaca
 
     def _fetch_history(self) -> pd.DataFrame:
-        data = yf.download(self.symbol, period="6mo", interval="1d", progress=False, auto_adjust=True)
+        # Alpaca first -- the API this account actually holds working
+        # credentials for -- falling back to yfinance (unauthenticated
+        # scrape, no uptime guarantee) only if Alpaca is off or thin.
+        if self.alpaca is not None and getattr(self.alpaca, "enabled", False):
+            bars = self.alpaca.bars([self.symbol], "1d", limit=140).get(self.symbol)
+            if bars is not None and len(bars) >= 35:
+                return bars
+        try:
+            data = yf.download(self.symbol, period="6mo", interval="1d", progress=False, auto_adjust=True)
+        except Exception:
+            logger.exception("yfinance fetch failed for %s", self.symbol)
+            return pd.DataFrame()
         if isinstance(data.columns, pd.MultiIndex):
             data.columns = data.columns.get_level_values(0)
         return data

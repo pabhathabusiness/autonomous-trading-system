@@ -24,20 +24,6 @@ function colorForScore(score) {
   return "rgba(231,76,60,0.35)";
 }
 
-async function loadRegime() {
-  const el = $("regime-content");
-  try {
-    const r = await fetchJSON("/api/regime");
-    el.innerHTML = `
-      <div class="regime-badge regime-${r.regime}">${r.regime}</div>
-      <p>${r.symbol} ${price(r.price)} &middot; RSI ${num(r.rsi, 1)} (${r.condition})</p>
-      <p class="muted">1d ${pct(r.trend_1d, 1)} &middot; 5d ${pct(r.trend_5d, 1)} &middot; 10d ${pct(r.trend_10d, 1)} &middot; 30d ${pct(r.trend_30d, 1)}</p>
-    `;
-  } catch (e) {
-    el.innerHTML = `<p class="muted">${e.message}</p>`;
-  }
-}
-
 async function loadAccounts() {
   const el = $("accounts-content");
   try {
@@ -539,7 +525,7 @@ async function loadTrackRecord() {
 }
 
 async function loadAll() {
-  await Promise.all([loadRegime(), loadAccounts(), loadPerformance(), loadSectors(),
+  await Promise.all([loadAccounts(), loadPerformance(), loadSectors(),
     loadProposals(), loadLive(), loadTrades()]);
 }
 
@@ -562,7 +548,8 @@ async function loadEngineStatus() {
 }
 
 // ==================== Robinhood-style live dashboard ====================
-const biasClass = (b) => b === "Bullish" ? "biastag-bull" : b === "Bearish" ? "biastag-bear" : "biastag-neut";
+const biasClass = (b) => b === "Bullish" ? "biastag-bull" : b === "Bearish" ? "biastag-bear" : b === "Neutral" ? "biastag-neut" : "biastag-none";
+const biasLabel = (b) => b || "no data";
 const gradeClass = (g) => (g && "ABCDF".includes(g)) ? "g-" + g : "g-U";
 const gradeText = (g) => g === "UNGRADED" ? "UG" : (g || "—");
 const gradeRank = (g) => ({ A: 5, B: 4, C: 3, D: 2, F: 1 }[g] || 0);
@@ -592,9 +579,9 @@ async function loadBiasStrip() {
     el.innerHTML = d.symbols.map(m => `
       <div class="biascard ${m.symbol === 'SPY' ? 'spy' : ''}" onclick="openBias('${m.symbol}')">
         <div class="bc-top"><span class="bc-tk">${m.symbol}</span>
-          <span class="biastag ${biasClass(m.bias)}">${m.bias}</span></div>
-        <div class="bc-price">${price(m.price)}</div>
-        <div class="bc-chg ${(m.session_pct ?? 0) >= 0 ? 'pos' : 'neg'}">${m.session_pct != null ? pct(m.session_pct, 2) : '—'} ${ageLabel(m.age_seconds)}</div>
+          <span class="biastag ${biasClass(m.bias)}">${biasLabel(m.bias)}</span></div>
+        <div class="bc-price ${m.price == null ? 'muted' : ''}">${m.price != null ? price(m.price) : 'unavailable'}</div>
+        <div class="bc-chg ${trendClass(m.session_pct)}">${trendText(m.session_pct)}${m.price != null ? ' ' + ageLabel(m.age_seconds) : ''}</div>
         <div class="bc-lvls"><span class="lvl-up">above <b>${m.level_above != null ? num(m.level_above, 2) : '—'}</b></span>
           <span class="lvl-dn">watch <b>${m.level_below != null ? num(m.level_below, 2) : '—'}</b></span></div>
       </div>`).join("");
@@ -623,6 +610,11 @@ async function loadSectorBoard() {
 }
 
 // #7 Market Context: indices (SPY/QQQ/IWM) + VIX + breadth + calendar + news.
+// null/missing must never read as "flat positive" -- a genuinely-unavailable
+// value gets its own muted state instead of borrowing the green/red classes.
+function trendClass(v) { return v == null ? 'muted' : (v >= 0 ? 'pos' : 'neg'); }
+function trendText(v, d = 2) { return v != null ? pct(v, d) : 'unavailable'; }
+
 async function loadMarketOverview() {
   const tiles = $("market-tiles"); if (!tiles) return;
   try {
@@ -631,36 +623,43 @@ async function loadMarketOverview() {
     if (asof) asof.textContent = d.as_of ? "as of " + new Date(d.as_of).toLocaleTimeString() : "";
     // indices are click-through like the bias cards -> fold into biasData
     (d.indices || []).forEach(m => biasData[m.symbol] = m);
+
+    const regime = d.regime ? `<div class="mtile">
+        <div class="mt-tk">SPY regime</div>
+        <div class="regime-badge regime-${d.regime.regime}">${d.regime.regime}</div>
+        <div class="mt-sub muted">RSI ${num(d.regime.rsi, 0)} · ${d.regime.condition}</div></div>`
+      : `<div class="mtile"><div class="mt-tk">SPY regime</div>
+        <div class="mt-val-sm muted">no scan yet</div></div>`;
     const idx = (d.indices || []).map(m => `
       <div class="mtile" onclick="openBias('${m.symbol}')">
         <div class="mt-tk">${m.symbol}</div>
-        <div class="mt-val">${price(m.price)}</div>
-        <div class="mt-sub ${(m.session_pct ?? 0) >= 0 ? 'pos' : 'neg'}">${m.session_pct != null ? pct(m.session_pct, 2) : '—'}</div>
+        <div class="mt-val ${m.price == null ? 'muted' : ''}">${m.price != null ? price(m.price) : 'unavailable'}</div>
+        <div class="mt-sub ${trendClass(m.session_pct)}">${trendText(m.session_pct)}</div>
       </div>`).join("");
     const vix = d.vix ? `<div class="mtile">
         <div class="mt-tk">VIX</div><div class="mt-val">${num(d.vix.level, 2)}</div>
-        <div class="mt-sub ${d.vix.change <= 0 ? 'pos' : 'neg'}">${signed(d.vix.change, 2)} · ${d.vix.state}</div></div>` : '';
+        <div class="mt-sub ${d.vix.change <= 0 ? 'pos' : 'neg'}">${signed(d.vix.change, 2)} · ${d.vix.state}</div></div>`
+      : `<div class="mtile"><div class="mt-tk">VIX</div><div class="mt-val-sm muted">unavailable</div></div>`;
     const br = d.breadth ? `<div class="mtile">
         <div class="mt-tk">Breadth</div><div class="mt-val">${d.breadth.pct_up}% up</div>
         <div class="mt-sub muted">${d.breadth.advancers}▲ / ${d.breadth.decliners}▼ sectors</div></div>` : '';
-    tiles.innerHTML = idx + vix + br || '<p class="muted">no data</p>';
+    tiles.innerHTML = regime + idx + vix + br;
 
-    // "what's coming": economic events + held-name earnings, merged by date
-    const cal = [
-      ...(d.economic || []).map(e => ({ date: e.date, label: e.event, kind: 'econ' })),
-      ...(d.earnings || []).map(e => ({ date: e.date, label: e.symbol + ' earnings', kind: 'earn' })),
-    ].sort((a, b) => a.date.localeCompare(b.date)).slice(0, 8);
+    // held-name earnings ahead (real, live-pulled -- the old static "economic
+    // calendar" here was hand-typed dates that never came from an API, so it
+    // was removed rather than dressed up as live data)
+    const earn = (d.earnings || []).slice(0, 8);
     const calEl = $("mkt-calendar");
-    if (calEl) calEl.innerHTML = cal.length ? cal.map(e =>
+    if (calEl) calEl.innerHTML = earn.length ? earn.map(e =>
       `<div class="cal-row"><span class="cal-date">${e.date.slice(5)}</span>
-        <span class="cal-label ${e.kind === 'earn' ? 'cal-earn' : ''}">${e.label}</span></div>`).join("")
-      : '<p class="muted">nothing scheduled</p>';
+        <span class="cal-label cal-earn">${e.symbol} earnings</span></div>`).join("")
+      : '<p class="muted">no earnings dates for your open positions</p>';
 
     const newsEl = $("mkt-news");
     if (newsEl) newsEl.innerHTML = (d.news || []).length ? (d.news || []).slice(0, 6).map(n =>
       `<div class="news-row">${n.url ? `<a href="${n.url}" target="_blank" rel="noopener noreferrer">${n.title}</a>` : n.title}
         ${n.provider ? `<span class="muted"> · ${n.provider}</span>` : ''}</div>`).join("")
-      : '<p class="muted">no headlines</p>';
+      : '<p class="muted">no headlines available</p>';
   } catch (e) { tiles.innerHTML = `<p class="muted">${e.message}</p>`; }
 }
 
@@ -800,12 +799,12 @@ function closeDetail() { $("detail-overlay").classList.remove("open"); $("detail
 function openBias(sym) {
   const m = biasData[sym]; if (!m) return;
   $("d-ticker").textContent = sym;
-  $("d-price").textContent = price(m.price);
-  const tag = $("d-tag"); tag.textContent = m.bias; tag.className = "biastag " + biasClass(m.bias);
+  $("d-price").textContent = m.price != null ? price(m.price) : "unavailable";
+  const tag = $("d-tag"); tag.textContent = biasLabel(m.bias); tag.className = "biastag " + biasClass(m.bias);
   $("detail-body").innerHTML = `
     <div class="d-kv">
-      <div class="cell"><div class="l">Stance</div><div class="v ${m.bias === 'Bullish' ? 'pos' : m.bias === 'Bearish' ? 'neg' : ''}">${m.bias} — conditional</div></div>
-      <div class="cell"><div class="l">Session</div><div class="v ${(m.session_pct ?? 0) >= 0 ? 'pos' : 'neg'}">${m.session_pct != null ? pct(m.session_pct, 2) : '—'}</div></div>
+      <div class="cell"><div class="l">Stance</div><div class="v ${m.bias === 'Bullish' ? 'pos' : m.bias === 'Bearish' ? 'neg' : m.bias == null ? 'muted' : ''}">${m.bias == null ? biasLabel(m.bias) : m.bias + ' — conditional'}</div></div>
+      <div class="cell"><div class="l">Session</div><div class="v ${trendClass(m.session_pct)}">${trendText(m.session_pct)}</div></div>
       <div class="cell"><div class="l">Key level above ▲</div><div class="v">${m.level_above != null ? num(m.level_above, 2) : '—'}</div></div>
       <div class="cell"><div class="l">Key level below ▼</div><div class="v">${m.level_below != null ? num(m.level_below, 2) : '—'}</div></div>
     </div>

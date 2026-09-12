@@ -314,29 +314,17 @@ async function loadProposals() {
   }
 }
 
+// Recent broker trades (approved proposals executed via Robinhood, across
+// accounts). The separate live "Positions" table used to sit here too, but it
+// duplicated this same data (an execution IS a position) via an extra N+1
+// Robinhood-quote-per-row fetch (/api/positions) -- removed rather than kept
+// as a second, slower view of the same thing. Live book (Alpaca-marked,
+// batched) is the one place for "what's open right now."
 async function loadTrades() {
   const el = $("trades-content");
   try {
-    const [positions, trades] = await Promise.all([
-      fetchJSON("/api/positions"),
-      fetchJSON("/api/trades"),
-    ]);
-    let html = "<h3>Positions</h3>";
-    html += positions.length ? `
-      <table><thead><tr><th>Account</th><th>Symbol</th><th>Qty</th><th>Avg</th><th>Current</th><th>Unrl. P/L</th></tr></thead>
-      <tbody>${positions.map(p => `
-        <tr>
-          <td><span class="tag tag-${p.account_type}">${p.account_type}</span></td>
-          <td>${p.symbol}</td><td>${p.quantity}</td><td>${price(p.avg_price)}</td>
-          <td>${price(p.current_price)}</td>
-          <td style="color:${p.unrealized_pnl >= 0 ? 'var(--green)' : 'var(--red)'}">
-            ${money(p.unrealized_pnl)} (${pct(p.unrealized_pnl_pct, 1)})
-          </td>
-        </tr>`).join("")}</tbody></table>
-    ` : '<p class="muted">No open positions</p>';
-
-    html += "<h3>Recent Trades</h3>";
-    html += trades.length ? `
+    const trades = await fetchJSON("/api/trades");
+    el.innerHTML = trades.length ? `
       <table><thead><tr><th>Account</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Status</th></tr></thead>
       <tbody>${trades.slice(0, 20).map(t => `
         <tr>
@@ -345,8 +333,6 @@ async function loadTrades() {
           <td>${price(t.entry_price)}</td><td>${t.status}</td>
         </tr>`).join("")}</tbody></table>
     ` : '<p class="muted">No trades yet</p>';
-
-    el.innerHTML = html;
   } catch (e) {
     el.innerHTML = `<p class="muted">${e.message}</p>`;
   }

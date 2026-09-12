@@ -600,22 +600,6 @@ def get_trades(account_type: Optional[str] = None, status: Optional[str] = None)
     return DB.get_trades(account_type=account_type, status=status)
 
 
-@app.get("/api/positions")
-def get_positions(account_type: Optional[str] = None) -> list[dict[str, Any]]:
-    positions = DB.get_positions(account_type=account_type)
-    for pos in positions:
-        quote = RH.get_quote(pos["symbol"])
-        if quote:
-            pos["current_price"] = quote["price"]
-            pos["market_value"] = pos["quantity"] * quote["price"]
-            pos["unrealized_pnl"] = pos["market_value"] - (pos["quantity"] * pos["avg_price"])
-            if pos["avg_price"]:
-                pos["unrealized_pnl_pct"] = round(
-                    (quote["price"] - pos["avg_price"]) / pos["avg_price"] * 100, 2
-                )
-    return positions
-
-
 @app.get("/api/accounts")
 def get_accounts() -> list[dict[str, Any]]:
     accounts = []

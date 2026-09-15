@@ -1,61 +1,146 @@
-"""Per-bar SPY regime tag.
+"""Layer-2 semantic regime.
 
-Mirrors src/market_analyzer.MarketAnalyzer's composite score, re-implemented
-so research/ has zero coupling to production imports. Any drift is a bug to
-reconcile in a follow-up.
+Two axes (trend × risk), full state stored per occurrence. Coarse buckets
+are REPORT-ONLY collapses of the full state — never overwrite or replace it.
 
-Rules (locked):
-  weights = {1d: 0.15, 5d: 0.30, 10d: 0.30, 30d: 0.25}
-  composite = weighted sum of pct changes on SPY closes
-  BULL if composite >= 2.0
-  BEAR if composite <= -2.0
-  else NEUTRAL
+Aligns with the Telegram bot's naming (`TRENDING_DOWN`, `RISK_OFF`, ...) as
+observed in alerts. Exact bot semantics reconciled when the bot repo is
+attached; version bump if the taxonomy diverges.
 """
 
 from __future__ import annotations
 
-from typing import Iterable
+from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 import pandas as pd
 
 
-_WEIGHTS = {"1d": 0.15, "5d": 0.30, "10d": 0.30, "30d": 0.25}
-_BULL_TH = 2.0
-_BEAR_TH = -2.0
+Trend = Literal["STRONG_UPTREND", "UPTREND", "SIDEWAYS", "DOWNTREND", "STRONG_DOWNTREND", "UNKNOWN"]
+Risk = Literal["RISK_ON", "RISK_NEUTRAL", "RISK_OFF", "UNKNOWN"]
+
+CoarseBucket = Literal["BULL_ENV", "BEAR_ENV", "CHOP", "UNKNOWN"]
 
 
-def _pct(closes: pd.Series, periods: int) -> pd.Series:
-    return (closes / closes.shift(periods) - 1.0) * 100.0
+@dataclass(frozen=True)
+class SemanticRegime:
+    trend: Trend
+    risk: Risk
+
+    @property
+    def label(self) -> str:
+        return f"{self.trend}+{self.risk}"
+
+    @property
+    def coarse(self) -> CoarseBucket:
+        if self.trend == "UNKNOWN" or self.risk == "UNKNOWN":
+            return "UNKNOWN"
+        if self.trend == "STRONG_UPTREND":
+            return "BULL_ENV"
+        if self.trend == "UPTREND" and self.risk in ("RISK_ON", "RISK_NEUTRAL"):
+            return "BULL_ENV"
+        if self.trend == "STRONG_DOWNTREND":
+            return "BEAR_ENV"
+        if self.trend == "DOWNTREND" and self.risk in ("RISK_OFF", "RISK_NEUTRAL"):
+            return "BEAR_ENV"
+        return "CHOP"
 
 
-def regime_series(spy_closes: pd.Series) -> pd.Series:
-    """One tag per bar. Requires at least ~31 bars of SPY history for the first
-    valid row; rows before that are 'UNKNOWN'."""
-    p1 = _pct(spy_closes, 1)
-    p5 = _pct(spy_closes, 5)
-    p10 = _pct(spy_closes, 10)
-    p30 = _pct(spy_closes, 30)
-    composite = (
-        _WEIGHTS["1d"] * p1
-        + _WEIGHTS["5d"] * p5
-        + _WEIGHTS["10d"] * p10
-        + _WEIGHTS["30d"] * p30
-    )
-    tag = pd.Series("NEUTRAL", index=spy_closes.index)
-    tag = tag.mask(composite >= _BULL_TH, "BULL")
-    tag = tag.mask(composite <= _BEAR_TH, "BEAR")
-    tag = tag.mask(composite.isna(), "UNKNOWN")
-    return tag
+# --------------------------------------------------------------------- helpers
+def _ema(x: pd.Series, span: int) -> pd.Series:
+    return x.ewm(span=span, adjust=False).mean()
 
 
-def tag_at(spy_closes: pd.Series, timestamp: pd.Timestamp) -> str:
-    """Regime at a given bar timestamp. If SPY doesn't have that exact
-    timestamp (weekend, etc.), we use the most recent SPY close ≤ timestamp."""
-    if len(spy_closes) == 0:
+def _roc(x: pd.Series, periods: int) -> pd.Series:
+    return (x / x.shift(periods) - 1.0) * 100.0
+
+
+def _true_range(df: pd.DataFrame) -> pd.Series:
+    hl = df["high"] - df["low"]
+    hc = (df["high"] - df["close"].shift(1)).abs()
+    lc = (df["low"] - df["close"].shift(1)).abs()
+    return pd.concat([hl, hc, lc], axis=1).max(axis=1)
+
+
+def _atr(df: pd.DataFrame, period: int) -> pd.Series:
+    return _true_range(df).rolling(period).mean()
+
+
+# --------------------------------------------------------------------- axes
+def _trend_state(closes: pd.Series) -> Trend:
+    if len(closes) < 55:
         return "UNKNOWN"
-    idx = spy_closes.index.searchsorted(timestamp, side="right") - 1
+    e9 = _ema(closes, 9).iloc[-1]
+    e20 = _ema(closes, 20).iloc[-1]
+    e21 = _ema(closes, 21).iloc[-1]
+    e50 = _ema(closes, 50).iloc[-1]
+    c = float(closes.iloc[-1])
+    roc30 = float(_roc(closes, 30).iloc[-1]) if len(closes) > 30 else float("nan")
+    if not np.isfinite(roc30):
+        return "UNKNOWN"
+
+    if e9 > e21 > e50 and c > e20 and roc30 > 5:
+        return "STRONG_UPTREND"
+    if e20 > e50 and c > e20 and 2 < roc30 <= 5:
+        return "UPTREND"
+    if e9 < e21 < e50 and c < e20 and roc30 < -5:
+        return "STRONG_DOWNTREND"
+    if e20 < e50 and c < e20 and -5 <= roc30 < -2:
+        return "DOWNTREND"
+    return "SIDEWAYS"
+
+
+def _risk_state(df: pd.DataFrame) -> Risk:
+    if len(df) < 60:
+        return "UNKNOWN"
+    closes = df["close"]
+    c = float(closes.iloc[-1])
+    lo60 = float(closes.tail(60).min())
+    hi60 = float(closes.tail(60).max())
+    rng = hi60 - lo60 if hi60 > lo60 else 1.0
+    pct_in_range = (c - lo60) / rng  # 0 = at low, 1 = at high
+
+    atr14 = _atr(df, 14)
+    atr_last = float(atr14.iloc[-1])
+    atr_mean_60 = float(atr14.tail(60).mean())
+    ratio = atr_last / atr_mean_60 if atr_mean_60 > 0 else float("nan")
+
+    if not np.isfinite(ratio):
+        return "UNKNOWN"
+
+    if pct_in_range >= 0.8 and ratio < 1.2:
+        return "RISK_ON"
+    if pct_in_range <= 0.2 or ratio > 1.5:
+        return "RISK_OFF"
+    return "RISK_NEUTRAL"
+
+
+# --------------------------------------------------------------------- API
+def semantic_regime_at(spy_df: pd.DataFrame, timestamp: pd.Timestamp) -> SemanticRegime:
+    """Full Layer-2 state at (or immediately before) `timestamp`. If SPY doesn't
+    have that exact timestamp, uses the most recent SPY bar ≤ timestamp."""
+    if spy_df is None or spy_df.empty:
+        return SemanticRegime("UNKNOWN", "UNKNOWN")
+    idx = spy_df.index.searchsorted(timestamp, side="right") - 1
     if idx < 0:
-        return "UNKNOWN"
-    tag = regime_series(spy_closes.iloc[: idx + 1])
-    return tag.iloc[-1]
+        return SemanticRegime("UNKNOWN", "UNKNOWN")
+    slice_ = spy_df.iloc[: idx + 1]
+    trend = _trend_state(slice_["close"])
+    risk = _risk_state(slice_)
+    return SemanticRegime(trend, risk)
+
+
+def semantic_regime_series(spy_df: pd.DataFrame) -> pd.Series:
+    """One label per bar. Slow (O(n) per bar); use only for offline tagging.
+
+    Returns a Series of SemanticRegime.label strings, indexed by spy_df.index.
+    """
+    if spy_df is None or spy_df.empty:
+        return pd.Series(dtype=object)
+    labels = []
+    for i in range(len(spy_df)):
+        s = spy_df.iloc[: i + 1]
+        r = SemanticRegime(_trend_state(s["close"]), _risk_state(s))
+        labels.append(r.label)
+    return pd.Series(labels, index=spy_df.index)

@@ -77,7 +77,9 @@ def test_detector_scan_result_does_not_change_with_future_corruption():
     assert early, "detector produced no occurrences on truncated history that had at least one"
     ea = early[0]
     for k in ("was_breakout_at_tm1", "holding_above_at_t", "compression",
-              "ema_stack_up", "macd_state", "fresh_macd_reaccel_up"):
+              "ema_stack_up", "macd_state", "fresh_macd_reaccel_up",
+              "level_type", "breakout_age_bars", "distance_to_level_atr",
+              "room_to_next_level_atr", "room_to_next_level_R"):
         assert occ.features.get(k) == ea.features.get(k), (
             f"feature {k!r} changed with future truncation: {occ.features.get(k)!r} vs {ea.features.get(k)!r}"
         )

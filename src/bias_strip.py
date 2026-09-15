@@ -7,6 +7,12 @@ key levels) is cached per symbol (~10 min) because it only moves on new daily
 bars; only the live price/age is refreshed on every call, so a 5s dashboard
 poll never re-downloads daily history for eight names.
 
+Daily bars for the structural read come from Alpaca first -- it's the market
+data API this account actually holds working credentials for, and one batched
+call covers every symbol instead of N sequential round-trips. yfinance (an
+unauthenticated, unofficial scrape) is only a fallback for when Alpaca is
+disabled or a symbol's bars come back empty.
+
 Bias is CONDITIONAL, never a forecast: the frontend renders it as
 "Bullish above X / watch Y below" using level_above / level_below.
 """
@@ -16,6 +22,7 @@ from __future__ import annotations
 import time
 from typing import Any, Optional
 
+import pandas as pd
 import yfinance as yf
 
 from src import indicators
@@ -24,15 +31,18 @@ _CACHE: dict[str, dict[str, Any]] = {}
 _TTL = 600  # seconds
 
 
-def _structural(symbol: str) -> Optional[dict[str, Any]]:
-    """Daily structure read for one symbol (cached). Bias + nearest key levels."""
+def _structural(symbol: str, df: Optional[pd.DataFrame] = None) -> Optional[dict[str, Any]]:
+    """Daily structure read for one symbol (cached). Bias + nearest key levels.
+    Takes an optional pre-fetched (Alpaca) daily-bars frame; falls back to a
+    yfinance history pull when none is supplied or it's too thin to use."""
     hit = _CACHE.get(symbol)
     if hit and time.time() - hit["ts"] < _TTL:
         return hit["data"]
-    try:
-        df = yf.Ticker(symbol).history(period="1y", interval="1d", auto_adjust=True)
-    except Exception:
-        df = None
+    if df is None or df.empty or len(df) < 30:
+        try:
+            df = yf.Ticker(symbol).history(period="1y", interval="1d", auto_adjust=True)
+        except Exception:
+            df = None
     if df is None or df.empty or len(df) < 30:
         return None
     closes = df["Close"]
@@ -63,10 +73,15 @@ def _structural(symbol: str) -> Optional[dict[str, Any]]:
 
 
 def build(alpaca, symbols: list[str]) -> list[dict[str, Any]]:
-    live = alpaca.latest_prices(symbols) if getattr(alpaca, "enabled", False) else {}
+    enabled = getattr(alpaca, "enabled", False)
+    live = alpaca.latest_prices(symbols) if enabled else {}
+    # One batched call for every symbol's daily bars, instead of N sequential
+    # yfinance scrapes -- also what makes this resilient when yfinance itself
+    # is unreachable (rate-limited, blocked, whatever) but Alpaca is fine.
+    daily_bars = alpaca.bars(symbols, "1d", limit=260) if enabled else {}
     out: list[dict[str, Any]] = []
     for sym in symbols:
-        st = _structural(sym)
+        st = _structural(sym, daily_bars.get(sym))
         info = live.get(sym, {})
         lp = info.get("price")
         if lp is None and st:
@@ -77,7 +92,10 @@ def build(alpaca, symbols: list[str]) -> list[dict[str, Any]]:
             "symbol": sym,
             "price": lp,
             "session_pct": session_pct,
-            "bias": st["bias"] if st else "Neutral",
+            # None (no data) is distinct from a real "Neutral" read -- collapsing
+            # them made a symbol we simply couldn't fetch look identically
+            # assessed to one that's genuinely flat.
+            "bias": st["bias"] if st else None,
             "level_above": st["level_above"] if st else None,
             "level_below": st["level_below"] if st else None,
             "age_seconds": info.get("age_seconds"),

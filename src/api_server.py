@@ -64,7 +64,7 @@ def run_full_scan(config: dict[str, Any], db: Database, rh_client: RobinhoodClie
     """One full pass: market regime -> sector ranks -> per-account
     screen -> technical analysis -> proposals. Read-only / analysis-only;
     never places an order."""
-    market = MarketAnalyzer(config).analyze_and_store(db)
+    market = MarketAnalyzer(config, ALPACA).analyze_and_store(db)
 
     # each scan is a clean snapshot -- retire last scan's untouched proposals
     db.expire_pending_proposals()
@@ -461,14 +461,6 @@ def get_live() -> dict[str, Any]:
     return live_module.build_live_snapshot(DB, ALPACA)
 
 
-@app.get("/api/regime")
-def get_regime() -> dict[str, Any]:
-    regime = DB.get_latest_market_regime()
-    if regime is None:
-        raise HTTPException(404, "No market regime data yet -- run a scan first")
-    return regime
-
-
 @app.get("/api/sectors")
 def get_sectors(limit: int = 40) -> list[dict[str, Any]]:
     return DB.get_latest_sector_rankings(limit=limit)
@@ -608,22 +600,6 @@ def get_trades(account_type: Optional[str] = None, status: Optional[str] = None)
     return DB.get_trades(account_type=account_type, status=status)
 
 
-@app.get("/api/positions")
-def get_positions(account_type: Optional[str] = None) -> list[dict[str, Any]]:
-    positions = DB.get_positions(account_type=account_type)
-    for pos in positions:
-        quote = RH.get_quote(pos["symbol"])
-        if quote:
-            pos["current_price"] = quote["price"]
-            pos["market_value"] = pos["quantity"] * quote["price"]
-            pos["unrealized_pnl"] = pos["market_value"] - (pos["quantity"] * pos["avg_price"])
-            if pos["avg_price"]:
-                pos["unrealized_pnl_pct"] = round(
-                    (quote["price"] - pos["avg_price"]) / pos["avg_price"] * 100, 2
-                )
-    return positions
-
-
 @app.get("/api/accounts")
 def get_accounts() -> list[dict[str, Any]]:
     accounts = []
@@ -742,10 +718,13 @@ def get_drilldown(symbol: str) -> dict[str, Any]:
 
 @app.get("/api/market-overview")
 def get_market_overview() -> dict[str, Any]:
-    """Expanded Market Regime panel: indices (SPY/QQQ/IWM), VIX, breadth proxy,
-    economic calendar (static), earnings for held names, and market news."""
+    """Market Context panel: SPY regime, indices (SPY/QQQ/IWM), VIX, breadth
+    proxy, earnings for held names, and market news -- all live-pulled,
+    nothing static. One call so the dashboard doesn't need a second round
+    trip just for the regime read."""
     held = sorted({t["symbol"] for t in DB.get_paper_trades(status="open")})
-    return market_overview_module.build(ALPACA, DB.get_latest_sector_rankings(), CONFIG, held)
+    return market_overview_module.build(
+        ALPACA, DB.get_latest_sector_rankings(), held, DB.get_latest_market_regime())
 
 
 @app.get("/api/bias-strip")

@@ -1,0 +1,1317 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Trade Card Component</title>
+<meta name="description" content="Trade card component v0.2.0 — trader's-eye layout with 6-state FSM, all 14 fields, staleness affordances, and eight worked example cards. Design-only preview." />
+<style>
+  :root {
+    --bg: #0b0f14;
+    --bg-elev: #121821;
+    --bg-elev-2: #182130;
+    --rule: #253045;
+    --rule-strong: #3a4a66;
+
+    --fg: #e6edf6;
+    --fg-mute: #9fb0c8;
+    --fg-dim: #6b7c96;
+
+    --amber: #e0a83a;
+    --amber-tint: #3a2f14;
+    --blue: #4a9eff;
+    --blue-tint: #16273f;
+    --green: #3fb27f;
+    --green-tint: #133228;
+    --red: #e15a5a;
+    --red-tint: #351a1c;
+    --muted-border: #3a3d46;
+
+    --long: #78d19a;
+    --short: #ef8a8a;
+
+    --draft: #d9a441;
+    --draft-bg: #2a1f0c;
+
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  :root:not([data-theme="light"]) { color-scheme: dark; }
+
+  /* DD-10 — light-mode branch, guarded so data-theme="dark" always wins */
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      color-scheme: light;
+      --bg: #f6f8fb;
+      --bg-elev: #ffffff;
+      --bg-elev-2: #eef2f7;
+      --rule: #d8dfe8;
+      --rule-strong: #b6c1cf;
+
+      --fg: #1a2130;
+      --fg-mute: #55637a;
+      --fg-dim: #7c8aa3;
+
+      --amber: #a26e00;
+      --amber-tint: #fbecc7;
+      --blue: #1e6bd4;
+      --blue-tint: #d4e4fb;
+      --green: #1d7a4c;
+      --green-tint: #d0efdd;
+      --red: #b52b2b;
+      --red-tint: #fbd8d8;
+      --muted-border: #b6c1cf;
+
+      --long: #1d7a4c;
+      --short: #b52b2b;
+
+      --draft: #7a5300;
+      --draft-bg: #fbecc7;
+    }
+  }
+  :root[data-theme="dark"] { color-scheme: dark; }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/1.45 var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  .page { max-width: 1360px; margin: 0 auto; padding: 0 16px 64px; }
+
+  /* ============ DRAFT banner ============ */
+  .draft-banner {
+    background: var(--draft-bg);
+    color: var(--draft);
+    border-bottom: 1px solid var(--draft);
+    padding: 8px 20px;
+    font: 600 12px/1.4 var(--mono);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    text-align: center;
+  }
+
+  header.hd { padding: 20px 0 4px; }
+  header.hd h1 {
+    font-size: 18px; font-weight: 600; margin: 0 0 4px; letter-spacing: 0.2px;
+  }
+  header.hd .sub {
+    color: var(--fg-mute); font-size: 12px; margin-bottom: 20px;
+  }
+  header.hd code {
+    color: var(--fg); background: var(--bg-elev-2); padding: 1px 5px;
+    border-radius: 4px; font-family: var(--mono); font-size: 11px;
+  }
+
+  /* ============ FSM diagram ============ */
+  .fsm {
+    background: var(--bg-elev);
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    padding: 14px 16px 10px;
+    margin-bottom: 16px;
+  }
+  .fsm h2 {
+    font-size: 11px; margin: 0 0 8px; color: var(--fg-mute);
+    text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600;
+  }
+  .fsm svg { width: 100%; height: auto; max-height: 300px; display: block; }
+  .fsm svg text.tlabel {
+    fill: var(--fg-mute); paint-order: stroke fill;
+    stroke: var(--bg-elev); stroke-width: 3px; stroke-linejoin: round;
+  }
+  .fsm svg text.tlabel.warn { fill: var(--red); }
+  .fsm svg text.tlabel.decay { fill: var(--fg-dim); }
+  .fsm svg text.sname { paint-order: stroke fill; }
+  .fsm svg rect.node { fill: var(--bg-elev-2); }
+  .fsm svg rect.node.blocked { fill: var(--red-tint); }
+  .fsm svg rect.node.expired { fill: var(--bg-elev-2); }
+  .fsm-legend {
+    display: flex; flex-wrap: wrap; gap: 14px;
+    font-size: 11px; color: var(--fg-mute); margin-top: 6px;
+    font-family: var(--mono);
+  }
+  .fsm-legend span::before {
+    content: ""; display: inline-block; width: 10px; height: 10px;
+    border-radius: 2px; margin-right: 6px; vertical-align: -1px;
+  }
+  .lg-detected::before  { background: var(--muted-border); }
+  .lg-forming::before   { background: var(--amber); }
+  .lg-ready::before     { background: var(--blue); }
+  .lg-triggered::before { background: var(--green); }
+  .lg-blocked::before   { background: var(--red); }
+  .lg-expired::before   { background: var(--muted-border); }
+
+  /* ============ Transition table under SVG ============ */
+  .tx-table {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 6px 14px;
+    margin-top: 10px; padding-top: 10px;
+    border-top: 1px dashed var(--rule);
+    font: 11px/1.4 var(--mono);
+    color: var(--fg-mute);
+  }
+  .tx-table .tx { display: flex; gap: 6px; }
+  .tx-table .tx b { color: var(--fg); font-weight: 600; min-width: 30px; }
+
+  /* ============ Role legend strip ============ */
+  .role-legend {
+    background: var(--bg-elev);
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    padding: 10px 14px;
+    margin-bottom: 20px;
+    font-size: 11px;
+    color: var(--fg-mute);
+    line-height: 1.55;
+  }
+  .role-legend b { color: var(--fg); font-family: var(--mono); font-size: 10.5px; }
+  .role-legend code {
+    color: var(--fg); font-family: var(--mono);
+    background: var(--bg-elev-2); padding: 1px 4px; border-radius: 3px;
+  }
+
+  /* ============ Layout ============ */
+  main.layout {
+    display: grid;
+    grid-template-columns: 1fr 280px;
+    gap: 20px;
+    align-items: start;
+  }
+  @media (max-width: 1024px) { main.layout { grid-template-columns: 1fr; } }
+
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, 320px);
+    gap: 16px;
+    justify-content: start;
+  }
+
+  /* ============ CARD ============ */
+  .card {
+    width: 320px;
+    background: var(--bg-elev);
+    border: 1px solid var(--muted-border);
+    border-radius: 10px;
+    overflow: hidden;
+    color: var(--fg);
+    position: relative;
+  }
+  /* Solid for lifecycle-active states, dashed for pre/post — DD-1 */
+  .card.state-detected  { border: 1px dashed var(--muted-border); }
+  .card.state-forming   { border-color: var(--amber); }
+  .card.state-ready     { border-color: var(--blue); }
+  .card.state-triggered { border-color: var(--green); }
+  .card.state-blocked   { border-color: var(--red); }
+  .card.state-expired   { border: 1px dashed var(--muted-border); opacity: 0.85; }
+
+  /* STALE amber ring (fires when ring-stale flag set), section 9 */
+  .card.ring-stale { box-shadow: inset 0 0 0 2px var(--amber); }
+
+  /* held banner + 70% opacity on stale-underlying, section 10 */
+  .card.held { opacity: 0.7; }
+  .held-banner {
+    display: none;
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--amber);
+    background: var(--amber-tint);
+    padding: 3px 12px; border-bottom: 1px solid var(--rule);
+    text-align: center;
+  }
+  .card.held .held-banner { display: block; }
+
+  /* zone A */
+  .zone-a {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 12px 8px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .zone-a .ticker {
+    font-family: var(--mono); font-weight: 700;
+    font-size: 15px; letter-spacing: 0.06em;
+  }
+  .zone-a .ticker.muted { color: var(--fg-mute); }
+  .zone-a .a-right { display: flex; align-items: center; gap: 10px; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 8px; border-radius: 999px;
+    font-family: var(--mono); font-size: 10.5px; font-weight: 600;
+    letter-spacing: 0.08em; text-transform: uppercase;
+  }
+  .pill .glyph { font-size: 12px; line-height: 1; }
+  .pill.detected  { background: var(--bg-elev-2); color: var(--fg-mute); border: 1px dashed var(--muted-border); }
+  .pill.forming   { background: var(--amber-tint); color: var(--amber); }
+  .pill.ready     { background: var(--blue-tint);  color: var(--blue); }
+  .pill.triggered { background: var(--green-tint); color: var(--green); }
+  .pill.blocked   { background: var(--red-tint);   color: var(--red); }
+  .pill.expired   { background: var(--bg-elev-2); color: var(--fg-mute); border: 1px dashed var(--muted-border); }
+
+  /* ? suffix — appended when >=3 fields stale-or-absent (section 9) */
+  .pill.qflag::after { content: "?"; margin-left: 3px; font-weight: 700; }
+
+  .fresh {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-family: var(--mono); font-size: 11px; color: var(--fg-mute);
+  }
+  .fresh .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 0 2px rgba(63, 178, 127, 0.15);
+  }
+  .fresh.warn .dot { background: var(--amber); box-shadow: 0 0 0 2px rgba(224, 168, 58, 0.15); }
+  .fresh.bad  .dot { background: var(--red);   box-shadow: 0 0 0 2px rgba(225, 90, 90, 0.15); }
+  .fresh.subdued .dot { background: var(--fg-dim); box-shadow: 0 0 0 2px rgba(107, 124, 150, 0.15); }
+
+  /* zone B */
+  .zone-b {
+    padding: 10px 12px; display: grid; gap: 6px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .ctx-row {
+    display: grid; grid-template-columns: 42px 1fr;
+    align-items: baseline; gap: 8px;
+    font-family: var(--mono); font-size: 11.5px;
+  }
+  .ctx-label {
+    color: var(--fg-dim); text-transform: uppercase;
+    letter-spacing: 0.08em; font-size: 10px;
+    display: flex; align-items: center; gap: 4px;
+  }
+  .ctx-val { color: var(--fg); }
+  .ctx-val .bull { color: var(--green); }
+  .ctx-val .bear { color: var(--red); }
+  .ctx-val .neu  { color: var(--fg-mute); }
+  .ctx-val .warn { color: var(--amber); }
+  .ctx-val .stale-prefix::before { content: "~"; margin-right: 2px; color: var(--amber); }
+  .ctx-val.empty { color: var(--fg-dim); font-style: normal; }
+
+  .role {
+    color: var(--fg-dim); font-size: 8.5px;
+    background: var(--bg-elev-2); border: 1px solid var(--rule);
+    padding: 0 4px; border-radius: 3px;
+    font-family: var(--mono); letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .mtf { display: inline-flex; align-items: center; gap: 8px; }
+  .mtf-grid {
+    display: inline-grid; grid-template-columns: repeat(4, 22px); gap: 2px;
+    font-family: var(--mono); font-size: 10.5px; text-align: center;
+  }
+  .mtf-cell {
+    background: var(--bg-elev-2); border-radius: 3px;
+    padding: 2px 0; color: var(--fg-mute);
+  }
+  .mtf-cell.plus  { color: var(--green); }
+  .mtf-cell.minus { color: var(--red); }
+  .mtf-cell.neu   { color: var(--fg-dim); }
+  .mtf-legend { font-size: 9px; color: var(--fg-dim); }
+
+  /* zone C */
+  .zone-c {
+    padding: 10px 12px 12px;
+    border-bottom: 1px solid var(--rule);
+    border-left: 3px solid var(--muted-border);
+    background: var(--bg-elev-2);
+  }
+  .card.state-forming   .zone-c { border-left-color: var(--amber); }
+  .card.state-ready     .zone-c { border-left-color: var(--blue); }
+  .card.state-triggered .zone-c { border-left-color: var(--green); }
+  .card.state-blocked   .zone-c { border-left-color: var(--red); }
+
+  .zone-c .lbl {
+    font-family: var(--mono); font-size: 9.5px;
+    letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--fg-dim); margin-bottom: 2px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .setup {
+    font-size: 12.5px; line-height: 1.35;
+    color: var(--fg); margin-bottom: 8px;
+  }
+  .setup.empty { color: var(--fg-dim); }
+  .setup.expired { text-decoration: line-through; color: var(--fg-mute); }
+  .side {
+    font-family: var(--mono); font-size: 11.5px;
+    color: var(--fg); margin-bottom: 6px;
+    display: flex; flex-direction: column; gap: 3px;
+  }
+  .side .branch-long  { color: var(--long); }
+  .side .branch-short { color: var(--short); }
+  .side .branch-none  { color: var(--fg-dim); }
+  .side.resolved .resolved-line { font-weight: 600; }
+  /* DD-6 · R-DISCARD — un-fired leg loses directional color on TRIGGERED */
+  .side .discarded {
+    color: var(--fg-mute); text-decoration: line-through;
+  }
+
+  .trig, .inv {
+    font-family: var(--mono); font-size: 11px; color: var(--fg);
+    display: grid; grid-template-columns: 42px 1fr; gap: 8px; margin-top: 4px;
+  }
+  .trig .k, .inv .k {
+    color: var(--fg-dim); text-transform: uppercase;
+    letter-spacing: 0.08em; font-size: 10px;
+    display: flex; align-items: center; gap: 4px;
+  }
+  .inv .v { color: var(--red); }
+  .card.state-triggered .inv .v { color: var(--fg); }
+  .card.state-ready     .inv .v { color: var(--fg); }
+  .card.state-expired   .inv .v { color: var(--fg-mute); }
+  .trig .v.far::before { content: "far · "; color: var(--amber); }
+  .inv .v.hit::before  { content: "HIT · "; color: var(--red); font-weight: 700; }
+
+  /* zone D */
+  .zone-d {
+    padding: 8px 12px; border-bottom: 1px solid var(--rule);
+    display: grid; grid-template-columns: 42px 1fr; gap: 8px; align-items: center;
+  }
+  .zone-d .k {
+    font-family: var(--mono); font-size: 10px;
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-dim);
+    display: flex; align-items: center; gap: 4px;
+  }
+  .zone-d .v {
+    font-family: var(--mono); font-size: 11.5px; color: var(--fg); line-height: 1.35;
+  }
+  .zone-d .v .rr { color: var(--fg-mute); font-size: 10.5px; }
+  .zone-d .v .warn { color: var(--red); }
+  .zone-d .v .ok { color: var(--green); }
+
+  /* zone E */
+  .zone-e {
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    padding: 6px 0;
+    font-family: var(--mono); font-size: 10px; color: var(--fg-mute);
+  }
+  .meta-cell {
+    padding: 4px 8px; border-right: 1px solid var(--rule);
+    display: flex; flex-direction: column; gap: 2px; align-items: flex-start;
+  }
+  .meta-cell:last-child { border-right: 0; }
+  .meta-cell .mk {
+    font-size: 8.5px; color: var(--fg-dim);
+    letter-spacing: 0.1em; text-transform: uppercase;
+    display: flex; align-items: center; gap: 4px;
+  }
+  .meta-cell .mv { color: var(--fg); font-size: 10.5px; }
+  .meta-cell .mv.on   { color: var(--amber); }
+  .meta-cell .mv.up   { color: var(--green); }
+  .meta-cell .mv.dn   { color: var(--red); }
+  .meta-cell .mv.mute { color: var(--fg-dim); }
+
+  /* banners */
+  .block-note {
+    display: none;
+    padding: 6px 12px;
+    background: var(--red-tint); color: var(--red);
+    font-family: var(--mono); font-size: 10.5px;
+    letter-spacing: 0.04em; border-top: 1px solid var(--rule);
+    line-height: 1.4;
+  }
+  .card.state-blocked .block-note { display: block; }
+  .block-note b { font-weight: 600; }
+
+  .fired-note {
+    display: none;
+    padding: 6px 12px;
+    background: var(--green-tint); color: var(--green);
+    font-family: var(--mono); font-size: 10.5px;
+    letter-spacing: 0.04em; border-top: 1px solid var(--rule);
+  }
+  .card.state-triggered .fired-note { display: block; }
+
+  .missing-note {
+    display: none;
+    padding: 6px 12px;
+    background: var(--amber-tint); color: var(--amber);
+    font-family: var(--mono); font-size: 10.5px;
+    letter-spacing: 0.04em; border-top: 1px solid var(--rule);
+    line-height: 1.4;
+  }
+  .card.state-forming .missing-note { display: block; }
+  .missing-note b { font-weight: 600; }
+
+  .expired-note {
+    display: none;
+    padding: 6px 12px;
+    background: var(--bg-elev-2); color: var(--fg-mute);
+    font-family: var(--mono); font-size: 10.5px;
+    letter-spacing: 0.04em; border-top: 1px dashed var(--rule);
+  }
+  .card.state-expired .expired-note { display: block; }
+
+  .foot {
+    padding: 5px 12px 7px;
+    border-top: 1px solid var(--rule);
+    display: flex; justify-content: space-between; align-items: center;
+    font-family: var(--mono); font-size: 9.5px; color: var(--fg-dim);
+  }
+
+  /* card caption for demo grouping */
+  .card-wrap {
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .card-caption {
+    font-family: var(--mono); font-size: 10px; color: var(--fg-mute);
+    letter-spacing: 0.06em; padding: 0 2px;
+  }
+  .card-caption b { color: var(--fg); }
+
+  /* ============ Sidebar Legend ============ */
+  aside.legend {
+    background: var(--bg-elev);
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    padding: 14px 14px 16px;
+    position: sticky; top: 20px;
+  }
+  aside.legend h2 {
+    font-size: 10.5px; letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--fg-mute);
+    margin: 0 0 10px; font-weight: 600;
+  }
+  .lg-states { display: grid; gap: 8px; margin-bottom: 12px; }
+  .lg-row {
+    display: grid; grid-template-columns: 22px 1fr;
+    gap: 10px; align-items: flex-start; font-size: 12px;
+  }
+  .lg-swatch {
+    width: 14px; height: 14px; border-radius: 3px;
+    margin-top: 2px; border: 1px solid;
+  }
+  .lg-swatch.detected  { background: var(--bg-elev-2); border: 1px dashed var(--muted-border); }
+  .lg-swatch.forming   { background: var(--amber-tint); border-color: var(--amber); }
+  .lg-swatch.ready     { background: var(--blue-tint);  border-color: var(--blue); }
+  .lg-swatch.triggered { background: var(--green-tint); border-color: var(--green); }
+  .lg-swatch.blocked   { background: var(--red-tint);   border-color: var(--red); }
+  .lg-swatch.expired   { background: var(--bg-elev-2); border: 1px dashed var(--muted-border); }
+  .lg-name { font-weight: 600; font-size: 12px; }
+  .lg-desc { color: var(--fg-mute); font-size: 11px; }
+
+  .lg-zones h3, .lg-roles h3 {
+    font-size: 10px; letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--fg-mute);
+    margin: 12px 0 8px; font-weight: 600;
+  }
+  .lg-zone, .lg-role { font-size: 11.5px; color: var(--fg); margin-bottom: 6px; }
+  .lg-zone .zn, .lg-role .rn {
+    display: inline-block; width: 60px;
+    font-family: var(--mono); color: var(--fg-mute); font-size: 10px;
+  }
+  .lg-zone .zn-fields, .lg-role .r-desc {
+    color: var(--fg-mute); font-family: var(--mono); font-size: 10.5px;
+  }
+
+  .lg-note {
+    margin-top: 12px; padding-top: 12px;
+    border-top: 1px solid var(--rule);
+    font-size: 11px; color: var(--fg-mute); line-height: 1.5;
+  }
+  .lg-note b { color: var(--fg); }
+</style>
+</head>
+<body>
+
+<div class="draft-banner">
+  DRAFT · for owner review, not wired to production · TradeCard v0.2.0
+</div>
+
+<div class="page">
+
+  <header class="hd">
+    <h1>Trade Card &mdash; component reference</h1>
+    <div class="sub">
+      Eight cards across the six-state FSM. All 14 owner-specified fields
+      render on every card. Contract <code>TradeCard/v0.2.0</code> &middot;
+      PLAYBOOK_v2.1.1 &middot; design-only, not wired.
+    </div>
+  </header>
+
+  <!-- ============ FSM diagram ============ -->
+  <section class="fsm" aria-label="FSM diagram">
+    <h2>State machine (6 states)</h2>
+    <svg viewBox="0 0 960 260" role="img" aria-labelledby="fsm-title">
+      <title id="fsm-title">DETECTED to FORMING to READY to TRIGGERED, with BLOCKED as branch and EXPIRED as terminal. Decay path READY to FORMING labeled T4.</title>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#9fb0c8" />
+        </marker>
+        <marker id="arr-warn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#e15a5a" />
+        </marker>
+        <marker id="arr-decay" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#8899b3" />
+        </marker>
+      </defs>
+      <g font-family="ui-monospace, Menlo, Consolas, monospace" font-size="12">
+        <!-- DETECTED -->
+        <g transform="translate(20,90)">
+          <rect class="node" width="130" height="46" rx="8" stroke="#3a3d46" stroke-dasharray="4 3"/>
+          <text class="sname" x="65" y="20" text-anchor="middle" fill="#9fb0c8" font-weight="600">DETECTED</text>
+          <text x="65" y="35" text-anchor="middle" fill="#9fb0c8" font-size="10" opacity="0.85">idea seed</text>
+        </g>
+        <!-- FORMING -->
+        <g transform="translate(180,90)">
+          <rect class="node" width="140" height="46" rx="8" stroke="#e0a83a"/>
+          <text class="sname" x="70" y="20" text-anchor="middle" fill="#e0a83a" font-weight="600">FORMING</text>
+          <text x="70" y="35" text-anchor="middle" fill="#9fb0c8" font-size="10">preconds unmet</text>
+        </g>
+        <!-- READY -->
+        <g transform="translate(350,90)">
+          <rect class="node" width="140" height="46" rx="8" stroke="#4a9eff"/>
+          <text class="sname" x="70" y="20" text-anchor="middle" fill="#4a9eff" font-weight="600">READY</text>
+          <text x="70" y="35" text-anchor="middle" fill="#9fb0c8" font-size="10">armed · awaiting fire</text>
+        </g>
+        <!-- TRIGGERED -->
+        <g transform="translate(520,90)">
+          <rect class="node" width="150" height="46" rx="8" stroke="#3fb27f"/>
+          <text class="sname" x="75" y="20" text-anchor="middle" fill="#3fb27f" font-weight="600">TRIGGERED</text>
+          <text x="75" y="35" text-anchor="middle" fill="#9fb0c8" font-size="10">side resolved</text>
+        </g>
+        <!-- EXPIRED -->
+        <g transform="translate(700,90)">
+          <rect class="node expired" width="130" height="46" rx="8" stroke="#3a3d46" stroke-dasharray="4 3"/>
+          <text class="sname" x="65" y="20" text-anchor="middle" fill="#9fb0c8" font-weight="600">EXPIRED</text>
+          <text x="65" y="35" text-anchor="middle" fill="#9fb0c8" font-size="10" opacity="0.85">terminal</text>
+        </g>
+        <!-- BLOCKED (branch) -->
+        <g transform="translate(340,190)">
+          <rect class="node blocked" width="200" height="46" rx="8" stroke="#e15a5a"/>
+          <text class="sname" x="100" y="20" text-anchor="middle" fill="#e15a5a" font-weight="600">BLOCKED (branch)</text>
+          <text x="100" y="35" text-anchor="middle" fill="#e15a5a" font-size="10" opacity="0.85">gate(s) active (D-3/4/6/8/13)</text>
+        </g>
+
+        <!-- T0 init -->
+        <line x1="0" y1="113" x2="20" y2="113" stroke="#9fb0c8" stroke-width="1.5" marker-end="url(#arr)"/>
+        <text class="tlabel" x="10" y="106" text-anchor="middle" font-size="9">T0</text>
+
+        <!-- T1 DETECTED -> FORMING -->
+        <line x1="150" y1="113" x2="180" y2="113" stroke="#9fb0c8" stroke-width="1.5" marker-end="url(#arr)"/>
+        <text class="tlabel" x="165" y="106" text-anchor="middle" font-size="10">T1</text>
+
+        <!-- T2 FORMING -> READY -->
+        <line x1="320" y1="113" x2="350" y2="113" stroke="#9fb0c8" stroke-width="1.5" marker-end="url(#arr)"/>
+        <text class="tlabel" x="335" y="106" text-anchor="middle" font-size="10">T2</text>
+
+        <!-- T3 READY -> TRIGGERED -->
+        <line x1="490" y1="113" x2="520" y2="113" stroke="#9fb0c8" stroke-width="1.5" marker-end="url(#arr)"/>
+        <text class="tlabel" x="505" y="106" text-anchor="middle" font-size="10">T3</text>
+
+        <!-- T9 TRIGGERED -> EXPIRED (or acknowledged INVALIDATION_HIT) -->
+        <line x1="670" y1="113" x2="700" y2="113" stroke="#9fb0c8" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arr-decay)"/>
+        <text class="tlabel decay" x="685" y="106" text-anchor="middle" font-size="10">T9</text>
+
+        <!-- T4 decay curve back READY -> FORMING -->
+        <path d="M355,138 C325,168 275,168 250,138" fill="none" stroke="#8899b3" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#arr-decay)"/>
+        <text class="tlabel decay" x="300" y="172" text-anchor="middle" font-size="10">T4 decay</text>
+
+        <!-- T5 from FORMING to BLOCKED -->
+        <path d="M245,138 C265,180 320,200 340,205" fill="none" stroke="#e15a5a" stroke-width="1.2" marker-end="url(#arr-warn)"/>
+        <text class="tlabel warn" x="255" y="192" text-anchor="middle" font-size="10">T5</text>
+
+        <!-- T5 from READY to BLOCKED -->
+        <path d="M410,138 C420,168 430,185 440,190" fill="none" stroke="#e15a5a" stroke-width="1.2" marker-end="url(#arr-warn)"/>
+        <text class="tlabel warn" x="450" y="170" text-anchor="middle" font-size="10">T5</text>
+
+        <!-- T7 TRIGGERED -> BLOCKED (invalidation hit) -->
+        <path d="M580,138 C570,175 555,190 545,205" fill="none" stroke="#e15a5a" stroke-width="1.2" marker-end="url(#arr-warn)"/>
+        <text class="tlabel warn" x="610" y="180" text-anchor="middle" font-size="10">T7 inv-hit</text>
+
+        <!-- T6 BLOCKED -> previous -->
+        <path d="M430,190 C400,168 380,150 370,140" fill="none" stroke="#8899b3" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#arr-decay)"/>
+        <text class="tlabel decay" x="365" y="180" text-anchor="middle" font-size="10">T6 clears</text>
+
+        <!-- T9 BLOCKED -> EXPIRED (STALE_DATA >15m or INVALIDATION_HIT ack) -->
+        <path d="M540,213 C620,215 700,175 760,138" fill="none" stroke="#8899b3" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#arr-decay)"/>
+        <text class="tlabel decay" x="680" y="220" text-anchor="middle" font-size="10">T9 blocked&gt;15m</text>
+
+        <!-- T10 FORMING -> BLOCKED (earnings tick) -->
+        <path d="M225,138 C230,175 320,205 340,213" fill="none" stroke="#e15a5a" stroke-width="1.2" marker-end="url(#arr-warn)"/>
+        <text class="tlabel warn" x="205" y="215" text-anchor="middle" font-size="10">T10 earnings</text>
+
+        <!-- T8 removal note -->
+        <text class="tlabel" x="850" y="30" text-anchor="middle" font-size="10">T8 remove (ranker drop)</text>
+      </g>
+    </svg>
+    <div class="tx-table" aria-label="Transition cross-reference">
+      <div class="tx"><b>T0</b> init &rarr; DETECTED</div>
+      <div class="tx"><b>T1</b> attach thesis &rarr; FORMING</div>
+      <div class="tx"><b>T2</b> preconds met &rarr; READY</div>
+      <div class="tx"><b>T3</b> trigger fires &rarr; TRIGGERED</div>
+      <div class="tx"><b>T4</b> decay / stale &rarr; FORMING</div>
+      <div class="tx"><b>T5</b> gate active &rarr; BLOCKED</div>
+      <div class="tx"><b>T6</b> gate clears &rarr; prev</div>
+      <div class="tx"><b>T7</b> invalidation hit &rarr; BLOCKED</div>
+      <div class="tx"><b>T8</b> ranker drops &rarr; (removed)</div>
+      <div class="tx"><b>T9</b> terminal degrade &rarr; EXPIRED</div>
+      <div class="tx"><b>T10</b> earnings blackout &rarr; BLOCKED</div>
+    </div>
+    <div class="fsm-legend">
+      <span class="lg-detected">DETECTED</span>
+      <span class="lg-forming">FORMING</span>
+      <span class="lg-ready">READY</span>
+      <span class="lg-triggered">TRIGGERED</span>
+      <span class="lg-blocked">BLOCKED (branch)</span>
+      <span class="lg-expired">EXPIRED (terminal)</span>
+    </div>
+  </section>
+
+  <!-- ============ Role legend strip ============ -->
+  <div class="role-legend">
+    <b>Field role tags</b> &middot;
+    <b>CTX</b> context signal &middot;
+    <b>THESIS</b> setup hypothesis &middot;
+    <b>SIDE</b> conditional side &middot;
+    <b>GATE</b> READY / BLOCKED gate &middot;
+    <b>FIRE</b> drives TRIGGERED &middot;
+    <b>RISK</b> R implication (zone D) &middot;
+    <b>DECAY</b> drives READY&rarr;FORMING &middot;
+    <b>META</b> freshness/derived &middot;
+    <b>STATE</b> FSM state (zone A).
+    &nbsp;Invariant: <code>current_structure_bias</code> and
+    <code>setup_hypothesis.direction</code> are independent (I-1).
+  </div>
+
+  <main class="layout">
+
+    <!-- ============ Card grid ============ -->
+    <section class="cards" id="cards"></section>
+
+    <!-- ============ Sidebar legend ============ -->
+    <aside class="legend">
+      <h2>State legend</h2>
+      <div class="lg-states">
+        <div class="lg-row">
+          <div class="lg-swatch detected"></div>
+          <div><div class="lg-name">DETECTED &middot; dashed &middot; &middot;</div><div class="lg-desc">Idea seed; setup/side not yet attached.</div></div>
+        </div>
+        <div class="lg-row">
+          <div class="lg-swatch forming"></div>
+          <div><div class="lg-name">FORMING &middot; solid amber &middot; &#9680;</div><div class="lg-desc">Setup developing; trigger levels defined.</div></div>
+        </div>
+        <div class="lg-row">
+          <div class="lg-swatch ready"></div>
+          <div><div class="lg-name">READY &middot; solid blue &middot; &#9681;</div><div class="lg-desc">Trigger armed; awaiting event.</div></div>
+        </div>
+        <div class="lg-row">
+          <div class="lg-swatch triggered"></div>
+          <div><div class="lg-name">TRIGGERED &middot; solid green &middot; &#9679;</div><div class="lg-desc">Trigger fired; side resolved.</div></div>
+        </div>
+        <div class="lg-row">
+          <div class="lg-swatch blocked"></div>
+          <div><div class="lg-name">BLOCKED &middot; solid red &middot; &#8856;</div><div class="lg-desc">Playbook gate(s); reasons in banner.</div></div>
+        </div>
+        <div class="lg-row">
+          <div class="lg-swatch expired"></div>
+          <div><div class="lg-name">EXPIRED &middot; dashed &middot; &#9676;</div><div class="lg-desc">Terminal: stale &gt;2&times;, inv-hit ack, window closed.</div></div>
+        </div>
+      </div>
+
+      <div class="lg-zones">
+        <h3>Trader's-eye zones</h3>
+        <div class="lg-zone"><span class="zn">A</span> Header <span class="zn-fields">#4 state, #14 fresh</span></div>
+        <div class="lg-zone"><span class="zn">B</span> Context <span class="zn-fields">#1 bias, #8 MTF, #9 RS, #7 S/D, #13 ERN</span></div>
+        <div class="lg-zone"><span class="zn">C</span> Hypothesis <span class="zn-fields">#2 setup, #3 side, #5 trig, #6 inv</span></div>
+        <div class="lg-zone"><span class="zn">D</span> Risk <span class="zn-fields">R implication</span></div>
+        <div class="lg-zone"><span class="zn">E</span> Meta <span class="zn-fields">#10 SQZ, #11 EVT, #12 NXT, #14 FRESH</span></div>
+      </div>
+
+      <div class="lg-roles">
+        <h3>Zone-to-role map</h3>
+        <div class="lg-role"><span class="rn">CTX</span><span class="r-desc">#1, #7</span></div>
+        <div class="lg-role"><span class="rn">GATE</span><span class="r-desc">#6, #8, #9, #10, #11, #12, #13</span></div>
+        <div class="lg-role"><span class="rn">THESIS</span><span class="r-desc">#2</span></div>
+        <div class="lg-role"><span class="rn">SIDE</span><span class="r-desc">#3</span></div>
+        <div class="lg-role"><span class="rn">FIRE</span><span class="r-desc">#5</span></div>
+        <div class="lg-role"><span class="rn">RISK</span><span class="r-desc">R (zone D, composed from #6)</span></div>
+        <div class="lg-role"><span class="rn">META</span><span class="r-desc">#14</span></div>
+        <div class="lg-role"><span class="rn">STATE</span><span class="r-desc">#4</span></div>
+      </div>
+
+      <div class="lg-note">
+        <b>I-1</b> current bias (#1) and hypothesis direction (#2.direction)
+        are independent. NVDA below: bias BULL, hypothesis SHORT
+        (failed-breakout). This is the divergence exemplar the spec cites.
+      </div>
+    </aside>
+  </main>
+
+</div>
+
+<script>
+  // ==========================================================================
+  // Eight demo cards. Every card renders all 14 fields (or the field's empty
+  // state per section 4). The card definitions below are pure data; the
+  // renderer in renderCard() maps them onto the zones and applies the
+  // state-driven CSS classes.
+  //
+  // Coverage:
+  //   1. DETECTED    - empty card (section 13)
+  //   2. FORMING     - NVDA divergence (section 5, I-1, DD-9)
+  //   3. FORMING(T4) - post-decay w/ ~ prefix + amber ring + ? suffix
+  //   4. READY       - TSLA armed
+  //   5. TRIGGERED   - AMD (R-TRG + R-DISCARD demos)
+  //   6. BLOCKED     - META (multi-reason banner: DD-3)
+  //   7. BLOCKED(T7) - post-invalidation-hit with HIT prefix
+  //   8. EXPIRED     - stale-underlying with held banner + 70% opacity
+  // ==========================================================================
+  const CARDS = [
+
+    // -------------------- 1. DETECTED --------------------
+    {
+      caption: "1 &middot; <b>DETECTED</b> &middot; empty card, section 13",
+      state: "detected",
+      stateLabel: "DETECTED",
+      glyph: "·",
+      ticker: "AAPL",
+      tickerMuted: true,
+      fresh: { label: "9s", tone: "ok" },
+
+      bias:  { text: "n/a", tone: "empty" },
+      mtf:   { m1: "·", m5: "·", h1: "·", d1: "·" },
+      rs:    { text: "n/a", tone: "empty" },
+      sd:    { text: "S/D: no zones", tone: "empty" },
+      ern:   { text: "ERN ?", tone: "empty" },
+
+      setupEmpty: true,
+      setup: "no setup logged",
+      side:  { none: true, longExpr: null, shortExpr: null },
+      trig:  { text: "unset", empty: true },
+      inv:   { text: "unset", empty: true },
+
+      risk:  { line1: "R: pending option layer",
+               line2: { text: "R:R: —", mute: true } },
+
+      sqz:   { text: "—", tone: "mute" },
+      evt:   { text: "—", tone: "mute" },
+      nxt:   { text: "—", tone: "mute" },
+      meta_fresh: { text: "9s", tone: "" },
+
+      foot: "state_entered_at 09:31:00 &middot; idea 01a0…"
+    },
+
+    // -------------------- 2. FORMING NVDA divergence --------------------
+    {
+      caption: "2 &middot; <b>FORMING</b> &middot; NVDA divergence (section 5, I-1)",
+      state: "forming",
+      stateLabel: "FORMING",
+      glyph: "◐",
+      ticker: "NVDA",
+      fresh: { label: "4m", tone: "ok" },
+
+      // Bias BULL, but hypothesis direction is SHORT (failed-breakout).
+      bias:  { text: "BULL", note: "above 20/50, +slope", tone: "bull" },
+      mtf:   { m1: "+", m5: "+", h1: "+", d1: "+" },
+      rs:    { text: "+1.4 ↑", tone: "bull" },
+      sd:    { text: "S 149.6-150.0 (str 0.74)" },
+      ern:   { text: "ERN 22d" },
+
+      setup: "Failed-breakout SHORT at 148.5 · fade into VWAP reclaim below",
+      side:  {
+        // Two branches: SHORT primary (thesis), LONG retained (tape-continuation).
+        longExpr:  "close_5m > 149.20 + rel-vol ≥ 1.5",
+        shortExpr: "5m rejects 148.5 + rel-vol ≥ 1.5"
+      },
+      trig:  { text: "watching 148.50 tag; not armed" },
+      inv:   { text: "invalid > 149.60 (2h close, 1.6R)" },
+
+      // R_UNDER_MIN NOT triggered as BLOCKED here because the card is still
+      // FORMING - the 1.6R distance is what BLOCKS a promotion to READY.
+      // The missing-for-READY banner lists it as the specific unmet cond.
+      risk:  { line1: "R = $220 planned",
+               line2: { text: "R:R to next-level = 1 : 0.8", warn: true } },
+
+      sqz:   { text: "off", tone: "mute" },
+      evt:   { text: "—", tone: "mute" },
+      nxt:   { text: "+0.5% / -0.4%", tone: "" },
+      meta_fresh: { text: "4m", tone: "" },
+
+      missing: "invalidation.distance_R &ge; 2.0 &middot; (squeeze OR momentum event) &middot; trigger.armed_at",
+      foot: "state_entered_at 09:41:22 &middot; idea a3f8…"
+    },
+
+    // -------------------- 3. FORMING(T4) post-decay --------------------
+    {
+      caption: "3 &middot; <b>FORMING</b> (after T4 decay from READY) &middot; ~ prefix, amber ring, <code>?</code> suffix",
+      state: "forming",
+      stateLabel: "FORMING",
+      glyph: "◐",
+      ticker: "NVDA",
+      subRingStale: true,
+      qFlag: true, // >=3 fields stale-or-absent
+      fresh: { label: "8m", tone: "warn" },
+
+      // Prior tape-continuation LONG (moved out of NVDA divergence card per DD-9).
+      // This card demonstrates decay: was READY, RS drifted NEUTRAL, arm-window
+      // expired, freshness slid to STALE. Multiple fields wear the ~ prefix.
+      bias:  { text: "BULL", note: "above 20/50", tone: "bull", stale: true },
+      mtf:   { m1: "+", m5: "·", h1: "+", d1: "+" },
+      rs:    { text: "0.0 →", tone: "" },
+      sd:    { text: "S 483.0-484.5 (str 0.62)", stale: true },
+      ern:   { text: "ERN ?", tone: "empty" },
+
+      setup: "Continuation LONG above prior-day high on 5m reclaim (decayed)",
+      side:  {
+        longExpr: "close_5m > 482.10 + rel-vol ≥ 1.4",
+        shortExpr: null // single-leg canonical form (DD-7)
+      },
+      trig:  { text: "arm window expired 10:04 (5 min without fire)" },
+      inv:   { text: "invalid < 478.90 (swing_low, 2.1R)" },
+
+      risk:  { line1: "R = $220 planned",
+               line2: { text: "R:R to next-level = 1 : 1.6", mute: true } },
+
+      sqz:   { text: "off", tone: "mute" },
+      evt:   { text: "—", tone: "mute" },
+      nxt:   { text: "+0.6% / -0.3%", tone: "" },
+      meta_fresh: { text: "8m", tone: "warn" },
+
+      missing: "rs_vs_spy direction consistent &middot; trigger.armed_at &middot; freshness &ge; AGING (currently STALE, T4 forced from READY)",
+      foot: "state_entered_at 10:04:00 &middot; T4 decay &middot; idea a3f9…"
+    },
+
+    // -------------------- 4. READY TSLA --------------------
+    {
+      caption: "4 &middot; <b>READY</b> &middot; armed, both legs live",
+      state: "ready",
+      stateLabel: "READY",
+      glyph: "◑",
+      ticker: "TSLA",
+      fresh: { label: "1m", tone: "ok" },
+
+      bias:  { text: "BULL", note: "above 20/50", tone: "bull" },
+      mtf:   { m1: "-", m5: "·", h1: "·", d1: "+" },
+      rs:    { text: "-0.9 ↓", tone: "bear" },
+      sd:    { text: "S 264.8-266.0 (str 0.81)" },
+      ern:   { text: "ERN 41d" },
+
+      setup: "Failed-HH fade with continuation LONG retained if range holds",
+      side:  {
+        shortExpr: "close_5m < 261.40 + reject wick ≥ 0.3 ATR",
+        longExpr:  "close_5m > 265.20 + rel-vol ≥ 1.5"
+      },
+      trig:  { text: "armed 09:52 (composite: PRICE + VOLUME)" },
+      inv:   { text: "invalid > 266.10 (swing_high, 2.4R)" },
+
+      risk:  { line1: "R = $310 planned",
+               line2: { text: "R:R to next-level = 1 : 2.6", ok: true } },
+
+      sqz:   { text: "tight (14b)", tone: "on" },
+      evt:   { text: "breakout", tone: "up" },
+      nxt:   { text: "+1.5% / -1.2%", tone: "" },
+      meta_fresh: { text: "1m", tone: "" },
+
+      foot: "state_entered_at 09:52:07 &middot; armed 7m &middot; idea 72c1…"
+    },
+
+    // -------------------- 5. TRIGGERED AMD --------------------
+    {
+      caption: "5 &middot; <b>TRIGGERED</b> &middot; R-TRG keeps hypothesis, R-DISCARD mutes losing leg",
+      state: "triggered",
+      stateLabel: "TRIGGERED",
+      glyph: "●",
+      ticker: "AMD",
+      fresh: { label: "27s", tone: "ok" },
+
+      bias:  { text: "RANGE", note: "153-160 shelf", tone: "neu" },
+      mtf:   { m1: "+", m5: "+", h1: "+", d1: "·" },
+      rs:    { text: "+2.1 ↑", tone: "bull" },
+      sd:    { text: "S 159.4-160.1 (str 0.66)" },
+      ern:   { text: "ERN 8d" },
+
+      // Rule R-TRG: hypothesis line is retained above the resolved side so
+      // I-1 survives post-fire. This is the RANGE / EITHER card - hypothesis
+      // direction was EITHER, resolved LONG on upper edge.
+      setup: "Range-edge break, EITHER side; hypothesis was direction-agnostic",
+      side: {
+        resolved: "→ LONG (upper edge fired)",
+        // DD-6 R-DISCARD: discarded leg rendered muted + struck, not pink.
+        discardLine: "SHORT if close_5m < 153.20 · discarded"
+      },
+      trig:  { text: "fired 10:04:11 — close_5m 156.94 @ vol 1.7× avg20" },
+      inv:   { text: "invalid < 155.90 (swing_low, 2.1R)" },
+
+      risk:  { line1: "R = $180 taken",
+               line2: { text: "R:R to next-level = 1 : 3.4", ok: true } },
+
+      sqz:   { text: "on (broke out)", tone: "on" },
+      evt:   { text: "breakout mag 1.3", tone: "up" },
+      nxt:   { text: "+2.1% / -0.6%", tone: "" },
+      meta_fresh: { text: "27s", tone: "" },
+
+      firedBanner: "● filled 10:04:11 &middot; managing to invalidation 155.90",
+      foot: "state_entered_at 10:04:11 &middot; in state 2m &middot; idea 55e0…"
+    },
+
+    // -------------------- 6. BLOCKED META (multi-reason) --------------------
+    {
+      caption: "6 &middot; <b>BLOCKED</b> &middot; two simultaneous reasons (DD-3)",
+      state: "blocked",
+      stateLabel: "BLOCKED",
+      glyph: "⊘",
+      ticker: "META",
+      fresh: { label: "3m", tone: "warn" },
+
+      bias:  { text: "MIXED", note: "SPY cluster r=0.71", tone: "warn" },
+      mtf:   { m1: "+", m5: "·", h1: "·", d1: "-" },
+      rs:    { text: "-0.2 →", tone: "" },
+      sd:    { text: "D 546.5-548.0 (str 0.58)" },
+      ern:   { text: "ERN 55d" },
+
+      setup: "VWAP reclaim LONG after morning flush",
+      side:  {
+        longExpr: "close_5m > VWAP + rel-vol ≥ 1.3",
+        shortExpr: null
+      },
+      trig:  { text: "armed 10:11 (suppressed while gate active)" },
+      // DD-2: R_UNDER_MIN now correctly cites invalidation.distance_R < 2.
+      inv:   { text: "invalid < 548.10 (VWAP, 1.6R)" },
+
+      risk:  { line1: "R = $410 planned",
+               line2: { text: "R:R to next-level = 1 : 1.3", warn: true } },
+
+      sqz:   { text: "on (9b)", tone: "on" },
+      evt:   { text: "gap-", tone: "dn" },
+      nxt:   { text: "+0.7% / -1.4%", tone: "" },
+      meta_fresh: { text: "3m", tone: "" },
+
+      // blocked_reasons: ["SPY_MIXED_REGIME", "R_UNDER_MIN"] - array (DD-3).
+      // Order matches deterministic display order in section 8.1.
+      blockReason: "<b>SPY_MIXED_REGIME (D-6)</b> &plus; <b>R_UNDER_MIN (D-3, inv 1.6R &lt; 2R)</b> &mdash; clears when SPY leaves MIXED AND invalidation distance recovers.",
+      foot: "state_entered_at 09:31:00 &middot; blocked 40m &middot; idea 91b7…"
+    },
+
+    // -------------------- 7. BLOCKED(T7) post-invalidation-hit -----------
+    {
+      caption: "7 &middot; <b>BLOCKED</b> (after T7) &middot; <code>HIT &middot;</code> prefix on invalidation",
+      state: "blocked",
+      stateLabel: "BLOCKED",
+      glyph: "⊘",
+      ticker: "COIN",
+      fresh: { label: "12s", tone: "ok" },
+
+      bias:  { text: "BEAR", note: "below 20/50, -slope", tone: "bear" },
+      mtf:   { m1: "-", m5: "-", h1: "-", d1: "·" },
+      rs:    { text: "-1.8 ↓", tone: "bear" },
+      sd:    { text: "D 178.0-179.4 (str 0.55)" },
+      ern:   { text: "ERN 14d" },
+
+      // Was TRIGGERED (SHORT); underlying printed back through 186.60.
+      setup: "Failed-lower-high SHORT · invalidation hit, position stopped",
+      side: {
+        resolved: "→ SHORT (fired 09:58)",
+        discardLine: "LONG if close_5m > 187.10 · discarded"
+      },
+      trig:  { text: "fired 09:58 — close_5m 184.90 @ rel-vol 1.6×", far: true },
+      // HIT prefix per section 4 R-INV, style .inv .v.hit
+      inv:   { text: "invalid > 186.60 (2h close, level BROKEN 10:07)", hit: true },
+
+      risk:  { line1: "R = $260 realized loss",
+               line2: { text: "R:R to next-level = 1 : —", mute: true } },
+
+      sqz:   { text: "off", tone: "mute" },
+      evt:   { text: "gap-", tone: "dn" },
+      nxt:   { text: "-0.9% / +0.4%", tone: "" },
+      meta_fresh: { text: "12s", tone: "" },
+
+      blockReason: "<b>INVALIDATION_HIT</b> &mdash; underlying printed 186.72 &gt; 186.60 at 10:07. Awaiting acknowledgment; on ack, T9 &rarr; EXPIRED.",
+      foot: "state_entered_at 10:07:14 &middot; T7 &middot; was TRIGGERED &middot; idea 44de…"
+    },
+
+    // -------------------- 8. EXPIRED stale-underlying --------------------
+    {
+      caption: "8 &middot; <b>EXPIRED</b> &middot; <code>held</code> banner + 70% opacity + <code>~</code> prefixes",
+      state: "expired",
+      stateLabel: "EXPIRED",
+      glyph: "◌",
+      ticker: "PLTR",
+      tickerMuted: true,
+      held: true,
+      qFlag: true,
+      fresh: { label: "42m", tone: "bad" },
+
+      bias:  { text: "MIXED", note: "", tone: "warn", stale: true },
+      mtf:   { m1: "·", m5: "·", h1: "·", d1: "·" },
+      rs:    { text: "n/a", tone: "empty" },
+      sd:    { text: "S/D: no zones", tone: "empty", stale: true },
+      ern:   { text: "ERN ?", tone: "empty" },
+
+      setup: "Cup-and-handle LONG at 27.4 (stale >24h, degraded to EXPIRED)",
+      setupExpired: true,
+      side:  {
+        longExpr: "close_5m > 27.40 + rel-vol ≥ 1.3",
+        shortExpr: null
+      },
+      trig:  { text: "arm window expired 42m ago", far: false },
+      inv:   { text: "invalid < 26.90 (last-known, 2.0R)" },
+
+      risk:  { line1: "R: pending option layer",
+               line2: { text: "R:R: last known 1 : 1.9", mute: true } },
+
+      sqz:   { text: "on (~stale)", tone: "on" },
+      evt:   { text: "—", tone: "mute" },
+      nxt:   { text: "~+1.1% / ~-0.8%", tone: "mute" },
+      meta_fresh: { text: "42m", tone: "" },
+
+      heldBannerText: "HELD &middot; underlying tick 3m40s stale &middot; card rendered at 70% opacity",
+      expiredNote: "reason: setup_hypothesis age > 24h &middot; retained for audit only &middot; will drop from ranker at 11:15",
+      foot: "state_entered_at 09:00:00 &middot; EXPIRED &middot; idea b220…"
+    }
+  ];
+
+  // -------- render helpers --------
+  function el(tag, cls, text) {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined) n.textContent = text;
+    return n;
+  }
+  function html(tag, cls, htmlStr) {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (htmlStr !== undefined) n.innerHTML = htmlStr;
+    return n;
+  }
+  function role(t) { return el("span", "role", t); }
+
+  function renderCard(c) {
+    const card = el("div", "card state-" + c.state
+      + (c.subRingStale ? " ring-stale" : "")
+      + (c.held ? " held" : ""));
+
+    // held banner sits at very top of card, before zone A
+    if (c.held && c.heldBannerText) {
+      card.appendChild(html("div", "held-banner", c.heldBannerText));
+    }
+
+    // ---- ZONE A ----
+    const a = el("div", "zone-a");
+    a.appendChild(el("div", "ticker" + (c.tickerMuted ? " muted" : ""), c.ticker));
+    const right = el("div", "a-right");
+    const pill = el("span", "pill " + c.state + (c.qFlag ? " qflag" : ""));
+    pill.appendChild(el("span", "glyph", c.glyph));
+    pill.appendChild(document.createTextNode(" " + c.stateLabel));
+    right.appendChild(pill);
+    const freshTone = c.fresh.tone === "warn" ? " warn"
+                    : c.fresh.tone === "bad"  ? " bad"
+                    : c.fresh.tone === "subdued" ? " subdued" : "";
+    const fresh = el("span", "fresh" + freshTone);
+    fresh.appendChild(el("span", "dot"));
+    fresh.appendChild(document.createTextNode(c.fresh.label));
+    right.appendChild(fresh);
+    a.appendChild(right);
+    card.appendChild(a);
+
+    // ---- ZONE B ----
+    const b = el("div", "zone-b");
+
+    // #1 BIAS
+    const biasRow = el("div", "ctx-row");
+    const biasLbl = el("span", "ctx-label");
+    biasLbl.appendChild(document.createTextNode("bias"));
+    biasLbl.appendChild(role("CTX"));
+    biasRow.appendChild(biasLbl);
+    const biasVal = el("span", "ctx-val" + (c.bias.tone === "empty" ? " empty" : ""));
+    const bTone = c.bias.tone === "bull" ? "bull"
+                : c.bias.tone === "bear" ? "bear"
+                : c.bias.tone === "warn" ? "warn"
+                : c.bias.tone === "empty" ? "neu" : "neu";
+    const biasText = el("span", bTone + (c.bias.stale ? " stale-prefix" : ""), c.bias.text);
+    biasVal.appendChild(biasText);
+    // Stale bias per section 4: prefix ~, drop reason
+    if (c.bias.note && !c.bias.stale && c.bias.tone !== "empty") {
+      biasVal.appendChild(document.createTextNode(" · "));
+      biasVal.appendChild(el("span", "neu", c.bias.note));
+    }
+    biasRow.appendChild(biasVal);
+    b.appendChild(biasRow);
+
+    // #8 MTF
+    const mtfRow = el("div", "ctx-row");
+    const mtfLbl = el("span", "ctx-label");
+    mtfLbl.appendChild(document.createTextNode("mtf"));
+    mtfLbl.appendChild(role("GATE"));
+    mtfRow.appendChild(mtfLbl);
+    const mtfWrap = el("div", "mtf");
+    const mtfGrid = el("div", "mtf-grid");
+    [c.mtf.m1, c.mtf.m5, c.mtf.h1, c.mtf.d1].forEach(raw => {
+      const cls = raw === "+" ? "plus" : raw === "-" ? "minus" : "neu";
+      mtfGrid.appendChild(el("div", "mtf-cell " + cls, raw));
+    });
+    mtfWrap.appendChild(mtfGrid);
+    mtfWrap.appendChild(el("span", "mtf-legend", "1m 5m 1H 1D"));
+    mtfRow.appendChild(mtfWrap);
+    b.appendChild(mtfRow);
+
+    // #9 RS
+    const rsRow = el("div", "ctx-row");
+    const rsLbl = el("span", "ctx-label");
+    rsLbl.appendChild(document.createTextNode("rs"));
+    rsLbl.appendChild(role("GATE"));
+    rsRow.appendChild(rsLbl);
+    const rsVal = el("span", "ctx-val" + (c.rs.tone === "empty" ? " empty" : ""));
+    rsVal.appendChild(el("span",
+      c.rs.tone === "bull" ? "bull" :
+      c.rs.tone === "bear" ? "bear" :
+      c.rs.tone === "empty" ? "neu" : "", c.rs.text));
+    rsRow.appendChild(rsVal);
+    b.appendChild(rsRow);
+
+    // #7 S/D
+    const sdRow = el("div", "ctx-row");
+    const sdLbl = el("span", "ctx-label");
+    sdLbl.appendChild(document.createTextNode("s/d"));
+    sdLbl.appendChild(role("CTX"));
+    sdRow.appendChild(sdLbl);
+    const sdVal = el("span", "ctx-val" + (c.sd.tone === "empty" ? " empty" : ""));
+    sdVal.appendChild(el("span", c.sd.stale ? "stale-prefix" : "", c.sd.text));
+    sdRow.appendChild(sdVal);
+    b.appendChild(sdRow);
+
+    // #13 ERN
+    const ernRow = el("div", "ctx-row");
+    const ernLbl = el("span", "ctx-label");
+    ernLbl.appendChild(document.createTextNode("ern"));
+    ernLbl.appendChild(role("GATE"));
+    ernRow.appendChild(ernLbl);
+    const ernVal = el("span", "ctx-val" + (c.ern.tone === "empty" ? " empty" : ""));
+    if (c.ern.text.indexOf("blackout") !== -1) {
+      ernVal.appendChild(el("span", "bear", c.ern.text));
+    } else {
+      ernVal.textContent = c.ern.text;
+    }
+    ernRow.appendChild(ernVal);
+    b.appendChild(ernRow);
+
+    card.appendChild(b);
+
+    // ---- ZONE C ----
+    const cz = el("div", "zone-c");
+    const setupLbl = el("div", "lbl");
+    setupLbl.appendChild(document.createTextNode("setup hypothesis"));
+    setupLbl.appendChild(role("THESIS"));
+    cz.appendChild(setupLbl);
+    const setupCls = "setup"
+      + (c.setupEmpty ? " empty" : "")
+      + (c.setupExpired ? " expired" : "");
+    cz.appendChild(el("div", setupCls, c.setup));
+
+    // Side: unresolved (both/one leg), or resolved (post-fire) + discarded
+    const side = el("div", "side" + (c.side.resolved ? " resolved" : ""));
+    if (c.side.none) {
+      // DETECTED: nothing to say
+      side.appendChild(el("div", "branch-none", "side: unset"));
+    } else if (c.side.resolved) {
+      // TRIGGERED: resolved side in state color, discarded in muted-struck (R-DISCARD)
+      const resolvedCls = c.side.resolved.indexOf("LONG") !== -1
+                       ? "branch-long resolved-line"
+                       : "branch-short resolved-line";
+      side.appendChild(el("div", resolvedCls, c.side.resolved));
+      if (c.side.discardLine) {
+        side.appendChild(el("div", "discarded", c.side.discardLine));
+      }
+    } else {
+      // FORMING / READY / BLOCKED: both legs, or one + literal em-dash (DD-7)
+      const longLine = el("div");
+      longLine.appendChild(el("span", "branch-long",
+        "LONG if  " + (c.side.longExpr ? c.side.longExpr : "—")));
+      side.appendChild(longLine);
+      const shortLine = el("div");
+      shortLine.appendChild(el("span", "branch-short",
+        "SHORT if  " + (c.side.shortExpr ? c.side.shortExpr : "—")));
+      side.appendChild(shortLine);
+    }
+    cz.appendChild(side);
+
+    // trigger
+    const trig = el("div", "trig");
+    const trigK = el("span", "k");
+    trigK.appendChild(document.createTextNode("trig"));
+    trigK.appendChild(role("FIRE"));
+    trig.appendChild(trigK);
+    const trigV = el("span", "v" + (c.trig.far ? " far" : "") + (c.trig.empty ? " empty" : ""));
+    trigV.textContent = c.trig.text;
+    trig.appendChild(trigV);
+    cz.appendChild(trig);
+
+    // invalidation
+    const inv = el("div", "inv");
+    const invK = el("span", "k");
+    invK.appendChild(document.createTextNode("inv"));
+    invK.appendChild(role("GATE"));
+    inv.appendChild(invK);
+    const invV = el("span", "v" + (c.inv.hit ? " hit" : "") + (c.inv.empty ? " empty" : ""));
+    invV.textContent = c.inv.text;
+    inv.appendChild(invV);
+    cz.appendChild(inv);
+
+    card.appendChild(cz);
+
+    // ---- ZONE D ----
+    const d = el("div", "zone-d");
+    const dK = el("span", "k");
+    dK.appendChild(document.createTextNode("R"));
+    dK.appendChild(role("RISK"));
+    d.appendChild(dK);
+    const v = el("span", "v");
+    v.appendChild(el("div", "", c.risk.line1));
+    const line2 = c.risk.line2;
+    const cls = "rr" + (line2.warn ? " warn" : line2.ok ? " ok" : line2.mute ? " mute" : "");
+    v.appendChild(el("div", cls, line2.text));
+    d.appendChild(v);
+    card.appendChild(d);
+
+    // ---- ZONE E ---- (all four cells now carry role tags, DD-8)
+    const e = el("div", "zone-e");
+    const cells = [
+      { k: "sqz",   role: "GATE", v: c.sqz.text,        tone: c.sqz.tone },
+      { k: "evt",   role: "GATE", v: c.evt.text,        tone: c.evt.tone },
+      { k: "nxt",   role: "GATE", v: c.nxt.text,        tone: c.nxt.tone },
+      { k: "fresh", role: "META", v: c.meta_fresh.text, tone: c.meta_fresh.tone }
+    ];
+    cells.forEach(cell => {
+      const mc = el("div", "meta-cell");
+      const mk = el("div", "mk");
+      mk.appendChild(document.createTextNode(cell.k));
+      mk.appendChild(role(cell.role));
+      mc.appendChild(mk);
+      mc.appendChild(el("div", "mv " + (cell.tone || ""), cell.v));
+      e.appendChild(mc);
+    });
+    card.appendChild(e);
+
+    // ---- Banners (state-driven) ----
+    if (c.state === "blocked" && c.blockReason) {
+      card.appendChild(html("div", "block-note", "⊘ " + c.blockReason));
+    }
+    if (c.state === "forming" && c.missing) {
+      card.appendChild(html("div", "missing-note", "<b>missing for READY:</b> " + c.missing));
+    }
+    if (c.state === "triggered" && c.firedBanner) {
+      card.appendChild(html("div", "fired-note", c.firedBanner));
+    }
+    if (c.state === "expired" && c.expiredNote) {
+      card.appendChild(html("div", "expired-note", "◌ " + c.expiredNote));
+    }
+
+    // ---- Foot ----
+    if (c.foot) card.appendChild(html("div", "foot", c.foot));
+
+    return card;
+  }
+
+  const host = document.getElementById("cards");
+  CARDS.forEach(c => {
+    const wrap = el("div", "card-wrap");
+    wrap.appendChild(renderCard(c));
+    if (c.caption) wrap.appendChild(html("div", "card-caption", c.caption));
+    host.appendChild(wrap);
+  });
+</script>
+
+</body>
+</html>

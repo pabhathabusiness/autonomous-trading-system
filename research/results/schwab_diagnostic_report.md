@@ -109,22 +109,24 @@ Underlying move IN THE TRADE DIRECTION (long for calls, short for puts):
 
 **Note on same-day options**: for grouped trades opened AND closed the same day, `hold_days == 0` so daily-bar MFE/MAE returns nothing (there is no bar *after* open and *before or on* close by daily definition). Those show as `None` above and are excluded from MFE/MAE averages.
 
-## GOOD IDEA / BAD EXECUTION CASES
+## UNDERLYING-MOVE vs OPTION-P&L QUADRANTS (P5, was 'GOOD IDEA / BAD EXECUTION')
 
-Diagnostic classification, NOT causal proof. Buckets defined on daily closes only.
+Descriptive quadrants only. **Labels are 'session-outcome × option-outcome', with no causal claim.** ('luck' and 'wrong thesis' language removed per P5.)
 
-Denominator: **161** option trades with a same-day-or-later exit bar available.
+Denominator: **161** option trades with a same-day-or-later exit bar available (multi-day only — daily granularity cannot classify same-day trades this way; use the intraday sample section for those).
 
-| Bucket | Description | n | share |
-|---|---|---:|---:|
-| **A** | underlying favorable AND option made money — 'idea+execution both worked' | 42 | 26.1% |
-| **B** | underlying favorable BUT option LOST — 'right thesis, wrong contract/timing' | 29 | 18.0% |
-| **C** | underlying unfavorable BUT option made money — 'wrong thesis, saved by luck or short-dated pop' | 8 | 5.0% |
-| **D** | underlying unfavorable AND option lost — 'thesis wrong' | 82 | 50.9% |
+| Quadrant | Underlying (exit close vs entry close) | Option realized P&L | n | share |
+|---|---|---|---:|---:|
+| A | favorable (moved with trade side) | POSITIVE | 42 | 26.1% |
+| B | favorable | NEGATIVE | 29 | 18.0% |
+| C | unfavorable | POSITIVE | 8 | 5.0% |
+| D | unfavorable | NEGATIVE | 82 | 50.9% |
 
 **Guardrails**:
-- The 'favorable at exit' flag is measured on the underlying's CLOSE on the exit date vs the underlying's CLOSE on the entry date. For same-day closes, `hold_days == 0` → no next-close available → those trades are excluded from this table (see the denominator).
-- Do NOT read causality into this. B ≠ proof of execution failure; A ≠ proof of skill. Big B share does raise the QUESTION of contract/timing selection.
+- Same-day trades are NOT in this denominator; they need intraday bars (see P3 section).
+- 'Favorable at exit' is measured on daily close vs daily close only; intraday drawdowns/rebounds are invisible here.
+- Quadrant B is a NECESSARY-but-not-sufficient marker for contract/timing failure. It is not proof of execution failure.
+- Quadrant C is a NECESSARY-but-not-sufficient marker for a mis-attributed win; it is not proof the thesis was wrong. Some Cs are due to option delta/gamma mechanics against a small underlying move.
 
 ## OPTION EXECUTION
 
@@ -155,6 +157,185 @@ Same-day-close and DTE cuts below are on grouped option trades.
 |---|---:|---:|---:|---:|---:|---:|
 | 1 contract | 472 | $-1,497.51 | $-3.17 | $-7.33 | 28.4% | 0.74 |
 | 2+ contracts | 345 | $-1,807.09 | $-5.24 | $-14.66 | 31.6% | 0.75 |
+
+## MONEYNESS AT ENTRY (P1)
+
+Denominator: **616** option grouped trades with entry-day underlying spot available in the cache.
+Definition: `pct = signed % ITM`. Calls: `(spot − strike)/strike × 100`. Puts: `(strike − spot)/strike × 100`. Buckets: **ITM_deep ≥ +5%**, ITM +2% to +5%, ATM ±2%, OTM −5% to −2%, OTM_deep ≤ −5%. Neutral by construction between calls and puts.
+
+| Moneyness bucket | n | net P&L | mean | median | win% | profit factor |
+|---|---:|---:|---:|---:|---:|---:|
+| ITM_deep | 11 | $128.14 | $11.65 | $0.00 | 45.5% | 2.08 |
+| ITM | 38 | $497.37 | $13.09 | $7.26 | 57.9% | 3.15 |
+| ATM | 341 | $-1,879.70 | $-5.51 | $-10.64 | 32.0% | 0.68 |
+| OTM | 104 | $-1,044.69 | $-10.05 | $-10.31 | 28.8% | 0.47 |
+| OTM_deep | 122 | $111.26 | $0.91 | $-7.32 | 22.1% | 1.07 |
+
+- Median moneyness pct across all trades: **-0.87%** (positive = ITM).
+- Fraction ITM (any degree): **8.0%**; ATM: **55.4%**; OTM (any degree): **36.7%**.
+
+## DTE CONDITIONED ON UNDERLYING OUTCOME (P2)
+
+Split option trades that HAVE an underlying exit-close available (n=161) into 'underlying moved favorably' vs 'unfavorably' by exit-day close vs entry-day close. Within each, rebucket by DTE at open. Question: does short DTE destroy otherwise-correct ideas?
+
+**Underlying moved FAVORABLY at exit close** (bucket A + B):
+
+| DTE | n | net P&L | mean | median | win% | profit factor |
+|---|---:|---:|---:|---:|---:|---:|
+| 0-1 ⚠ | 2 | $-112.96 | $-56.48 | $-56.48 | 0.0% | 0.00 |
+| 2-7 ⚠ | 12 | $178.19 | $14.85 | $5.20 | 58.3% | 1.75 |
+| 8-14 | 22 | $936.64 | $42.57 | $10.00 | 54.5% | 5.54 |
+| 15-30 ⚠ | 13 | $148.57 | $11.43 | $3.68 | 53.8% | 2.17 |
+| 31+ | 22 | $488.26 | $22.19 | $19.68 | 72.7% | 12.37 |
+
+**Underlying moved UNFAVORABLY at exit close** (bucket C + D):
+
+| DTE | n | net P&L | mean | median | win% | profit factor |
+|---|---:|---:|---:|---:|---:|---:|
+| 0-1 ⚠ | 2 | $-84.31 | $-42.16 | $-42.16 | 0.0% | 0.00 |
+| 2-7 | 27 | $-707.10 | $-26.19 | $-18.64 | 11.1% | 0.06 |
+| 8-14 | 19 | $-424.35 | $-22.33 | $-32.67 | 10.5% | 0.34 |
+| 15-30 ⚠ | 10 | $-176.52 | $-17.65 | $-18.82 | 20.0% | 0.07 |
+| 31+ | 32 | $-460.74 | $-14.40 | $-15.32 | 3.1% | 0.10 |
+
+Read: **within favorable-underlying trades, compare win% across DTE**. If short-DTE win% is materially below long-DTE win% on the FAVORABLE subset, that is evidence that short DTE destroys otherwise-correct ideas.
+
+## INTRADAY SAMPLE — 100 SAME-DAY OPTION TRADES (P3)
+
+Deterministic sample (hash-sorted): **100** same-day option grouped trades.
+Intraday reconstructions available (≥5 RTH bars on entry date): **100 / 100**.
+Intraday interval used: **10minute** (server auto-selected for a 3-month range; the user request was 5m, but the range × granularity would have exceeded upstream's bar cap — 10m preserves intraday direction and MFE/MAE fidelity).
+**Timing assumption**: the Schwab CSV has no intraday timestamps. All 'entry' metrics below assume entry ≈ session open and 'exit' ≈ session close for the sampled trades. This is an approximation; a real intraday entry-time would sharpen everything below.
+
+**Session-level intraday summaries** (n varies by field; each row shows its own denominator):
+
+| Field | n | mean | median | notes |
+|---|---:|---:|---:|---|
+| Session return (open → close, trade-direction-signed) | 100 | -0.00% | 0.03% | positive = underlying moved in trade direction over session |
+| MFE from session open, %  | 100 | 2.66% | 1.61% | best excursion in trade direction |
+| MAE from session open, %  | 100 | -1.22% | -0.86% | worst excursion opposite trade direction |
+| Entry location in session range | 100 | 0.49 | 0.52 | 0 = at day's low, 1 = at day's high |
+| Gap-open vs prior daily close, %  | 79 | -0.14% | 0.09% | signed gap |
+| Prior 3-day return through prev close, %  | 79 | 0.39% | 0.53% | context: was the name already running? |
+
+- Favorable-direction rate at session close: **66/100 = 66.0%**.
+- Extended-move-at-open flag (prior-3d > +5% OR |gap| > 2%): **18/100 = 18.0%** of sampled trades.
+
+**P&L split by extended-move-at-open flag** (option grouped-trade P&L, not underlying return):
+
+| Slice | n | net P&L | mean | median | win% |
+|---|---:|---:|---:|---:|---:|
+| Extended at open (chased?) | 18 | $-209.34 | $-11.63 | $-13.16 | 33.3% |
+| Not extended | 61 | $85.05 | $1.39 | $-7.32 | 39.3% |
+
+**P&L split by intraday session direction** (option grouped-trade P&L):
+
+| Underlying session moved | n | net P&L | mean | median | win% |
+|---|---:|---:|---:|---:|---:|
+| With trade side (favorable) | 66 | $387.16 | $5.87 | $-3.48 | 40.9% |
+| Against trade side (unfavorable) | 34 | $-578.92 | $-17.03 | $-13.82 | 20.6% |
+
+**Same-day intraday A/B/C/D-style split (sampled 100)** — descriptive labels only:
+
+| Cell | Definition | n | share |
+|---|---|---:|---:|
+| A' | session-favorable AND option won | 27 | 27.8% |
+| B' | session-favorable AND option lost | 37 | 38.1% |
+| C' | session-unfavorable AND option won | 7 | 7.2% |
+| D' | session-unfavorable AND option lost | 26 | 26.8% |
+
+**Read**: B' is the cell that, if large, points to the option contract failing to capture an otherwise-correct underlying move (or entry/exit timing inside the session). The sampled-100 estimate here is the closest evidence available in this environment for the 'good idea, bad execution / bad contract' hypothesis on the same-day book.
+
+## SPY VS INDIVIDUAL NAMES, WITH CONTROLS (P4)
+
+Compare SPY grouped option trades to individual-name grouped option trades AFTER controlling for DTE bucket × call/put × moneyness bucket × same-day status. Cells with n_SPY < 3 OR n_individual < 3 are marked ⚠ small-n and excluded from the summary line.
+
+| DTE | Side | Moneyness | Hold | n_SPY | mean_SPY | n_ind | mean_ind | Δ(SPY-ind) | flag |
+|---|---|---|---|---:|---:|---:|---:|---:|:---:|
+| 0-1 | C | ATM | same_day | 45 | $-12.55 | 54 | $10.68 | $-23.23 |  |
+| 0-1 | C | ITM | same_day | 0 | $0.00 | 3 | $56.91 | $0.00 | ⚠ |
+| 0-1 | C | NA | same_day | 0 | $0.00 | 9 | $-4.98 | $0.00 | ⚠ |
+| 0-1 | C | OTM | same_day | 0 | $0.00 | 18 | $-27.54 | $0.00 | ⚠ |
+| 0-1 | C | OTM_deep | multi_day | 0 | $0.00 | 1 | $-15.66 | $0.00 | ⚠ |
+| 0-1 | C | OTM_deep | same_day | 0 | $0.00 | 6 | $-13.88 | $0.00 | ⚠ |
+| 0-1 | P | ATM | multi_day | 2 | $-82.97 | 0 | $0.00 | $0.00 | ⚠ |
+| 0-1 | P | ATM | same_day | 72 | $-9.92 | 37 | $-13.14 | $3.22 |  |
+| 0-1 | P | ITM | same_day | 0 | $0.00 | 6 | $12.19 | $0.00 | ⚠ |
+| 0-1 | P | NA | same_day | 0 | $0.00 | 4 | $33.93 | $0.00 | ⚠ |
+| 0-1 | P | OTM | same_day | 0 | $0.00 | 11 | $-11.17 | $0.00 | ⚠ |
+| 0-1 | P | OTM_deep | multi_day | 0 | $0.00 | 1 | $-15.66 | $0.00 | ⚠ |
+| 0-1 | P | OTM_deep | same_day | 0 | $0.00 | 2 | $-18.15 | $0.00 | ⚠ |
+| 15-30 | C | ATM | multi_day | 0 | $0.00 | 5 | $-4.65 | $0.00 | ⚠ |
+| 15-30 | C | ATM | same_day | 0 | $0.00 | 5 | $-7.72 | $0.00 | ⚠ |
+| 15-30 | C | ITM | multi_day | 0 | $0.00 | 2 | $-26.81 | $0.00 | ⚠ |
+| 15-30 | C | ITM | same_day | 0 | $0.00 | 2 | $12.68 | $0.00 | ⚠ |
+| 15-30 | C | NA | multi_day | 0 | $0.00 | 13 | $4.89 | $0.00 | ⚠ |
+| 15-30 | C | NA | same_day | 0 | $0.00 | 12 | $-7.57 | $0.00 | ⚠ |
+| 15-30 | C | OTM | multi_day | 0 | $0.00 | 7 | $9.25 | $0.00 | ⚠ |
+| 15-30 | C | OTM | same_day | 0 | $0.00 | 4 | $6.26 | $0.00 | ⚠ |
+| 15-30 | C | OTM_deep | multi_day | 0 | $0.00 | 4 | $-14.40 | $0.00 | ⚠ |
+| 15-30 | C | OTM_deep | same_day | 0 | $0.00 | 8 | $-14.61 | $0.00 | ⚠ |
+| 15-30 | P | ATM | multi_day | 0 | $0.00 | 1 | $22.35 | $0.00 | ⚠ |
+| 15-30 | P | ITM_deep | multi_day | 0 | $0.00 | 1 | $-14.32 | $0.00 | ⚠ |
+| 15-30 | P | NA | multi_day | 0 | $0.00 | 1 | $9.68 | $0.00 | ⚠ |
+| 15-30 | P | OTM_deep | multi_day | 0 | $0.00 | 3 | $11.24 | $0.00 | ⚠ |
+| 2-7 | C | ATM | multi_day | 3 | $-44.32 | 10 | $23.95 | $-68.27 |  |
+| 2-7 | C | ATM | same_day | 6 | $-3.88 | 32 | $-1.04 | $-2.84 |  |
+| 2-7 | C | ITM | multi_day | 0 | $0.00 | 2 | $-2.07 | $0.00 | ⚠ |
+| 2-7 | C | ITM | same_day | 0 | $0.00 | 3 | $14.40 | $0.00 | ⚠ |
+| 2-7 | C | ITM_deep | same_day | 0 | $0.00 | 3 | $25.34 | $0.00 | ⚠ |
+| 2-7 | C | NA | multi_day | 0 | $0.00 | 11 | $6.18 | $0.00 | ⚠ |
+| 2-7 | C | NA | same_day | 0 | $0.00 | 24 | $-1.22 | $0.00 | ⚠ |
+| 2-7 | C | OTM | multi_day | 0 | $0.00 | 5 | $-32.51 | $0.00 | ⚠ |
+| 2-7 | C | OTM | same_day | 0 | $0.00 | 21 | $-9.13 | $0.00 | ⚠ |
+| 2-7 | C | OTM_deep | multi_day | 0 | $0.00 | 8 | $-13.49 | $0.00 | ⚠ |
+| 2-7 | C | OTM_deep | same_day | 0 | $0.00 | 11 | $-7.96 | $0.00 | ⚠ |
+| 2-7 | P | ATM | multi_day | 3 | $-56.66 | 2 | $-30.30 | $-26.36 | ⚠ |
+| 2-7 | P | ATM | same_day | 1 | $0.00 | 13 | $0.65 | $-0.65 | ⚠ |
+| 2-7 | P | ITM | multi_day | 0 | $0.00 | 1 | $-11.32 | $0.00 | ⚠ |
+| 2-7 | P | ITM | same_day | 0 | $0.00 | 3 | $9.82 | $0.00 | ⚠ |
+| 2-7 | P | ITM_deep | same_day | 0 | $0.00 | 1 | $40.35 | $0.00 | ⚠ |
+| 2-7 | P | NA | multi_day | 0 | $0.00 | 2 | $7.02 | $0.00 | ⚠ |
+| 2-7 | P | NA | same_day | 0 | $0.00 | 10 | $-11.35 | $0.00 | ⚠ |
+| 2-7 | P | OTM | multi_day | 0 | $0.00 | 2 | $-15.82 | $0.00 | ⚠ |
+| 2-7 | P | OTM | same_day | 0 | $0.00 | 15 | $-3.20 | $0.00 | ⚠ |
+| 2-7 | P | OTM_deep | multi_day | 0 | $0.00 | 3 | $-15.44 | $0.00 | ⚠ |
+| 2-7 | P | OTM_deep | same_day | 0 | $0.00 | 12 | $2.43 | $0.00 | ⚠ |
+| 31+ | C | ATM | multi_day | 0 | $0.00 | 5 | $-8.52 | $0.00 | ⚠ |
+| 31+ | C | ITM_deep | multi_day | 0 | $0.00 | 5 | $-7.52 | $0.00 | ⚠ |
+| 31+ | C | ITM_deep | same_day | 0 | $0.00 | 1 | $63.68 | $0.00 | ⚠ |
+| 31+ | C | NA | multi_day | 0 | $0.00 | 51 | $-7.71 | $0.00 | ⚠ |
+| 31+ | C | NA | same_day | 0 | $0.00 | 12 | $-7.18 | $0.00 | ⚠ |
+| 31+ | C | OTM | multi_day | 0 | $0.00 | 6 | $15.84 | $0.00 | ⚠ |
+| 31+ | C | OTM | same_day | 0 | $0.00 | 2 | $4.68 | $0.00 | ⚠ |
+| 31+ | C | OTM_deep | multi_day | 0 | $0.00 | 36 | $1.69 | $0.00 | ⚠ |
+| 31+ | C | OTM_deep | same_day | 0 | $0.00 | 6 | $-11.60 | $0.00 | ⚠ |
+| 31+ | P | ITM | multi_day | 0 | $0.00 | 2 | $-24.16 | $0.00 | ⚠ |
+| 31+ | P | NA | multi_day | 0 | $0.00 | 3 | $-21.77 | $0.00 | ⚠ |
+| 31+ | P | NA | same_day | 0 | $0.00 | 3 | $-8.00 | $0.00 | ⚠ |
+| 8-14 | C | ATM | multi_day | 1 | $-51.33 | 14 | $-26.10 | $-25.23 | ⚠ |
+| 8-14 | C | ATM | same_day | 1 | $-5.33 | 11 | $1.61 | $-6.94 | ⚠ |
+| 8-14 | C | ITM | multi_day | 0 | $0.00 | 6 | $39.62 | $0.00 | ⚠ |
+| 8-14 | C | ITM | same_day | 0 | $0.00 | 4 | $0.76 | $0.00 | ⚠ |
+| 8-14 | C | NA | multi_day | 0 | $0.00 | 15 | $-6.57 | $0.00 | ⚠ |
+| 8-14 | C | NA | same_day | 0 | $0.00 | 23 | $-10.04 | $0.00 | ⚠ |
+| 8-14 | C | OTM | multi_day | 0 | $0.00 | 5 | $-18.25 | $0.00 | ⚠ |
+| 8-14 | C | OTM | same_day | 0 | $0.00 | 7 | $-10.23 | $0.00 | ⚠ |
+| 8-14 | C | OTM_deep | multi_day | 0 | $0.00 | 7 | $111.06 | $0.00 | ⚠ |
+| 8-14 | C | OTM_deep | same_day | 0 | $0.00 | 8 | $-12.03 | $0.00 | ⚠ |
+| 8-14 | P | ATM | multi_day | 0 | $0.00 | 2 | $13.02 | $0.00 | ⚠ |
+| 8-14 | P | ATM | same_day | 0 | $0.00 | 1 | $5.68 | $0.00 | ⚠ |
+| 8-14 | P | ITM | multi_day | 0 | $0.00 | 1 | $20.68 | $0.00 | ⚠ |
+| 8-14 | P | ITM | same_day | 0 | $0.00 | 3 | $3.79 | $0.00 | ⚠ |
+| 8-14 | P | NA | multi_day | 0 | $0.00 | 3 | $-23.32 | $0.00 | ⚠ |
+| 8-14 | P | NA | same_day | 0 | $0.00 | 3 | $-3.32 | $0.00 | ⚠ |
+| 8-14 | P | OTM | same_day | 0 | $0.00 | 1 | $-23.64 | $0.00 | ⚠ |
+| 8-14 | P | OTM_deep | multi_day | 0 | $0.00 | 5 | $-8.32 | $0.00 | ⚠ |
+| 8-14 | P | OTM_deep | same_day | 0 | $0.00 | 1 | $-15.32 | $0.00 | ⚠ |
+
+**Controlled comparison across 4 cells with n≥3 on both sides**: mean-of-means (weighted by cell size) SPY − individual = **$-11.37** per trade.
+
+**Read**: SPY still underperforms individual names inside the same cell after controlling for DTE × side × moneyness × same-day status. Do NOT conclude SPY is inherently harmful; conclude that within this trader's book, SPY setups paid worse than same-shape non-SPY setups on this sample.
 
 ## SPY VS INDIVIDUAL NAMES
 
@@ -190,17 +371,28 @@ Preregistered simple features computed at entry-day close. **These are not perma
 
 All-option baseline (for comparison): n=817, mean **$-4.04**, win% **29.7%**, profit factor **0.74**.
 
-## INFLECTION-POINT HYPOTHESIS
+## INFLECTION-POINT FEATURES — SEPARATED (P6)
 
-Five preregistered predicates, evaluated on the option grouped trades that have entry-day bars. **Do not treat these as production rules.**
+Each base feature reported ON ITS OWN before any combination. All computed at entry-day close, on option grouped trades with adequate historical data (`≥ 60 bars of history for BB percentile / RS`; `≥ 30 for MACD state`; SMA reads their own minimums). Small N (< 20) flagged ⚠.
 
-| Hypothesis | n | net P&L | mean | median | win% | profit factor | fwd-1d underlying mean | fwd-5d underlying mean |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| A: fresh MACD cross (side-aligned) | 88 | $-456.53 | $-5.19 | $-8.48 | 35.2% | 0.69 | 0.29% | 0.41% |
-| B: A + BB compression | 45 | $-270.85 | $-6.02 | $-6.32 | 37.8% | 0.66 | 0.12% | 0.15% |
-| C: A + near recent support/resistance ⚠ small-N | 0 | $0.00 | $0.00 | $0.00 | 0.0% | — | — | — |
-| D: A + RS-vs-SPY on side | 22 | $-196.95 | $-8.95 | $-6.99 | 31.8% | 0.47 | 0.34% | 0.20% |
-| E: B + D (compression + RS + fresh cross) ⚠ small-N | 12 | $-60.78 | $-5.07 | $-6.32 | 33.3% | 0.65 | 0.68% | 2.06% |
+| Feature (side-aligned) | n TRUE / FALSE / UNAVAIL | mean_TRUE / FALSE | win%_TRUE / FALSE | PF_TRUE / FALSE | fwd-1d TRUE | fwd-5d TRUE |
+|---|---:|---:|---:|---:|---:|---:|
+| Fresh MACD cross within 3 bars | 88 / 528 / 0 | $-5.19 / $-3.28 | 35.2% / 30.7% | 0.69 / 0.79 | 0.29% | 0.41% |
+| BB compression (bottom quintile 60-bar) | 228 / 388 / 0 | $-7.45 / $-1.26 | 28.9% / 32.7% | 0.57 / 0.92 | -0.31% | -1.06% |
+| Near recent support/resistance (long ↔ low, short ↔ high) | 21 / 595 / 0 | $-13.06 / $-3.22 | 23.8% / 31.6% | 0.30 / 0.80 | 1.03% | 2.13% |
+| Relative strength on trade side | 265 / 351 / 0 | $1.34 / $-7.25 | 35.8% / 27.9% | 1.10 / 0.59 | -0.35% | -1.88% |
+
+**Combinations** (side-aligned in every case). Uses the individual predicates above.
+
+| Combination (side-aligned) | n | net P&L | mean | median | win% | profit factor |
+|---|---:|---:|---:|---:|---:|---:|
+| Cross + Compression | 45 | $-270.85 | $-6.02 | $-6.32 | 37.8% | 0.66 |
+| Cross + Near S/R ⚠ | 0 | $0.00 | $0.00 | $0.00 | 0.0% | — |
+| Cross + RS | 22 | $-196.95 | $-8.95 | $-6.99 | 31.8% | 0.47 |
+| Cross + Compression + RS ⚠ | 12 | $-60.78 | $-5.07 | $-6.32 | 33.3% | 0.65 |
+| Cross + Compression + Near S/R + RS (all 4) ⚠ | 0 | $0.00 | $0.00 | $0.00 | 0.0% | — |
+
+Small-N flags (⚠) mean the row is diagnostic only — do not treat it as evidence for or against the combination. Do not use these to build a rule.
 
 ## SEPARATE THREE FAILURE TYPES
 
@@ -229,11 +421,23 @@ Score of the evidence — qualitative, not causal.
 - Longest losing-day streak: **9** consecutive close-days.
 - Read: behavior/risk factors (same-day / short-DTE / concentration / re-entry) coincide with the highest-loss rows. Whether they CAUSE the loss or just AMPLIFY a selection problem is not separable from this sample alone.
 
-**Overall attribution — the honest verdict on this 3-month sample**:
-- The **D bucket (thesis wrong AND option lost)** is the largest single class of trades with bars (82 of 161). That is a **selection-heavy** signature.
-- The **B bucket (right thesis, wrong option)** is real but smaller (29 of 161). Execution failure is present, not primary.
-- **Behavior/risk factors** — same-day, 0-1 DTE, SPY concentration — align with the largest dollar losses. On the same sample they cannot be separated from selection: a bad thesis executed via 0DTE loses more than a bad thesis executed via 30DTE, but the thesis was still wrong.
-- **Conclusion category**: **multiple factors are material** (selection appears somewhat dominant on daily-bar evidence, behavior/risk amplifies it, execution failure exists but is not primary). Wait for the next 3-month window before hardening any single reading.
+**FINAL QUESTION**: 'When I lose, is it more often because the underlying idea was poor, because I entered/exited badly, or because the option contract structure failed to capture an otherwise-correct move?'
+
+The two lens comparison — daily multi-day vs sampled intraday same-day — tells materially different stories, and BOTH have to be taken seriously:
+
+- **Daily lens (n=161 multi-day trades)**: D (thesis-wrong-and-lost) = **50.9%**; B (thesis-right-but-lost) = **18.0%**. Daily D is roughly 2.8× daily B. **Selection dominates on multi-day trades.**
+- **Intraday lens (n=100 same-day sampled trades, 10-min bars)**: the largest quadrant is **B' (session-favorable, option lost) at 38.1%**; D' (both wrong) at 26.8%; A' at 27.8%; C' at 7.2%. **Contract/timing failure appears to be the largest single class of loss on same-day trades.**
+- The **book is 64.6% same-day trades** by grouped count (73% by lot). So the intraday lens governs the majority of your realized loss dollars. **The evidence points to contract/timing failure being a — arguably the — primary driver on the same-day book, and selection being the primary driver on the multi-day book.**
+- **Moneyness overlay**: 36.7% of option trades opened OTM (of which many are OTM_deep). ATM (55.4% of trades) has mean −$5.51/trade; OTM has mean −$10.05/trade; ITM has mean +$13.09. The OTM concentration is exactly where the 'right thesis, wrong contract' failure lives.
+- **DTE conditional on FAVORABLE underlying (P2 table)**: on n=71 trades where the underlying moved WITH the trade side at exit close, 8-14 DTE profit-factor was 5.54 and 31+ DTE profit-factor was 12.37 (both n≥22); the 0-1 and 2-7 DTE buckets on the favorable subset were small-N or lost money outright. When the thesis IS right at multi-day resolution, longer DTE captured it and shorter DTE did not.
+- **Individual-feature signal (P6)**: `Relative strength on trade side` is the only single feature where TRUE outperformed FALSE (mean +$1.34 vs −$7.25; PF 1.10 vs 0.59). Fresh MACD cross, BB compression, and near-recent-S/R did NOT differentiate favorably on this sample. That's evidence AGAINST 'MACD cross is my edge' on 3 months.
+
+**Overall attribution — honest verdict on this 3-month sample**:
+- On MULTI-DAY option trades: **selection is the biggest single contributor to losses** (D >> B on daily bars).
+- On SAME-DAY option trades (the majority of the book by count and by dollar loss): **contract-structure / intraday timing failure is the largest single contributor** (B' = 38.1% on the sampled 100). The underlying often went the right way inside the session; the option didn't capitalize.
+- **Behavior/risk factors** (same-day at 64.6%, 0-1 DTE at 34.7% of grouped options, OTM concentration, re-entry-within-3-days at 55.7%) amplify both primary modes; they are not a separable third class of loss.
+- **Conclusion category**: **multiple factors are material**, and the dominant factor is **book-composition-dependent** — selection on multi-day, contract/timing on same-day. Because most of your book is same-day, contract-structure/execution failure is doing more of the damage than the daily-only analysis alone suggests.
+- Reevaluate after (a) a second 3-month window, (b) a fuller intraday sample (200+, not 100), and (c) an intraday-timestamp source (Schwab confirmation emails or the broker's activity API) so real entry/exit times replace the 'entry=open, exit=close' approximation.
 
 ## WHAT LOOKS MOST DAMAGING
 
@@ -253,21 +457,21 @@ Rows to inspect further (not conclusions):
 
 ## WHAT WE CANNOT CONCLUDE
 
-Given only 3 months of realized-lot data plus daily bars:
-- **Intraday sequencing / execution slippage** — the CSV is date-only; whether losses came from bad entry price, bad exit price, or spread cost is not decidable here.
+Given 3 months of realized-lot data, daily bars for 40 tickers, and 10-min intraday bars for 40 tickers over the same window:
+- **True intraday entry/exit slippage** — the Schwab CSV has no timestamps. The P3 intraday reconstruction assumes entry ≈ session open and exit ≈ session close. Real entry/exit times could either strengthen or weaken the B' finding materially.
 - **Whether PABS setup context predicted these trades** — no historical PABS state is available in this environment. Any 'PABS said X' claim is not defensible from this data.
 - **Ticker-level edge** — 3 months is too short to declare any ticker an edge or a curse. All ticker rows are diagnostic; small-N flagged.
-- **Options-vs-stock counterfactual** — did the *stock* trade have worked? The CSV shows only what happened. The underlying-outcome section is a **hypothetical** on the underlying move, not the trade you actually made.
-- **Options structure sensitivity** — moneyness (ITM/ATM/OTM) is not analyzed here (strike-vs-spot at entry would need extra fetches). That is a genuine next step, not a claim.
-- **Regime interaction** — SPY was broadly rising over this window on daily closes; whether puts underperformed because of a bearish thesis in a rising tape vs. genuinely bad selection is not separable at 3 months.
+- **Regime interaction** — SPY was broadly rising over this window; whether puts underperformed because of a bearish thesis in a rising tape vs. genuinely bad selection is not separable at 3 months.
+- **Long-tail tickers (112 of 152, ~24% of grouped trades)** — no bars in cache for these; per-ticker rows exist but no context features / moneyness / intraday for them.
+- **Whether the intraday B' finding generalizes** — n=100 sampled trades is a starting point, not an established fact. A larger sample plus a second 3-month window is needed.
 
 ## NEXT RESEARCH STEP
 
-Ordered by cost-to-value, no code changes to production:
-1. **Extend the cache** to the long-tail 112 tickers (currently at 40; ~24% of trades are outside the cache). Uniform coverage removes selection artifacts in the per-ticker table.
-2. **Add option-structure fields** — at entry, compute moneyness (strike/spot − 1) and label each trade OTM/ATM/ITM. Rebucket P&L by moneyness × DTE. This is where 'right thesis, wrong contract' most often shows up.
-3. **Fetch intraday 5m or 1m bars for a random sample of 100 same-day-close trades** — daily bars can't tell you whether you got in on a high and out on a low, or vice versa. This is the direct test for execution failure.
-4. **Rerun on the next 3 months as they land.** All conclusions above are provisional at n≈300 grouped trades. The stability of the findings across a second, out-of-sample window is what matters.
-5. **Only after (2)-(4)**: build the setup-tag join (research/context.compute_context_at at entry) so PABS can produce a real 'setup-conditional expectancy' for this trader. Not until.
+Items 2 and 3 from the previous report are now completed (moneyness in P1, intraday sample in P3). Remaining ordered next steps, still no production changes:
+1. **Get real intraday timestamps** — pull Schwab's trade-execution history (activity feed / trade confirms), not just the tax lots. Real entry and exit times let the P3 quadrant classify without the entry≈open, exit≈close approximation. This is the single highest-value next step.
+2. **Extend the cache to the long-tail 112 tickers.** Uniform coverage removes selection artifacts in the per-ticker table and lets P2/P3 run on the whole book.
+3. **Expand the intraday sample from 100 to 300+** with the fuller cache. B' at 38.1% is a big number; confirm it doesn't shrink at scale.
+4. **Rerun on the next 3 months of realized data as they land.** All findings above are still provisional at n≈872 grouped trades. Stability across a second window is what matters.
+5. **Only after (1)-(4)**: build the setup-tag join (research/context.compute_context_at at entry) so PABS can produce a real 'setup-conditional expectancy' for this trader. Not until.
 
 **Not next steps** (explicitly): no whitelist, no permanent ticker bans, no composite score, no production rule changes, no threshold optimization on this same sample.

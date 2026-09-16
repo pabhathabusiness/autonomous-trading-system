@@ -20,6 +20,7 @@ composite score, no threshold optimization, no ML.
 from __future__ import annotations
 
 import csv
+import hashlib
 import math
 import statistics as stats
 from collections import Counter, defaultdict
@@ -411,8 +412,181 @@ def _bucket_stats(gls: list[float]) -> dict:
     }
 
 
+# --------------------------------------------------- moneyness (P1)
+@dataclass
+class Moneyness:
+    pct: float   # signed % ITM (positive) / OTM (negative), symmetric across calls/puts
+    bucket: str  # "ITM_deep" | "ITM" | "ATM" | "OTM" | "OTM_deep"
+    intrinsic_pct: float  # same convention
+
+
+def compute_moneyness(t: GroupedTrade, spot: float) -> Moneyness | None:
+    """Positive pct = in-the-money by that %. Buckets:
+       ATM ∈ [-2%, +2%]; ITM > +2%, ITM_deep > +5%; OTM < -2%, OTM_deep < -5%."""
+    if not t.is_option or t.strike is None or t.side not in ("C", "P") or spot <= 0:
+        return None
+    if t.side == "C":
+        pct = (spot - t.strike) / t.strike * 100.0
+    else:
+        pct = (t.strike - spot) / t.strike * 100.0
+    if pct >= 5.0:
+        bucket = "ITM_deep"
+    elif pct >= 2.0:
+        bucket = "ITM"
+    elif pct >= -2.0:
+        bucket = "ATM"
+    elif pct >= -5.0:
+        bucket = "OTM"
+    else:
+        bucket = "OTM_deep"
+    return Moneyness(pct=pct, bucket=bucket, intrinsic_pct=pct)
+
+
+# --------------------------------------------------- intraday bars (P3)
+@dataclass
+class IntraBar:
+    ny_date: date
+    ny_time: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: int
+    session: str
+
+
+def load_intraday(cache_dir: Path) -> dict[str, list[IntraBar]]:
+    out: dict[str, list[IntraBar]] = {}
+    for f in sorted(cache_dir.glob("*.csv")):
+        rows: list[IntraBar] = []
+        with f.open() as fh:
+            r = csv.DictReader(fh)
+            for row in r:
+                rows.append(IntraBar(
+                    ny_date=datetime.strptime(row["ny_date"], "%Y-%m-%d").date(),
+                    ny_time=row["ny_time"],
+                    open=float(row["open"]),
+                    high=float(row["high"]),
+                    low=float(row["low"]),
+                    close=float(row["close"]),
+                    volume=int(row["volume"]),
+                    session=row.get("session", "reg"),
+                ))
+        # Only RTH bars (session='reg')
+        rows = [b for b in rows if b.session == "reg"]
+        rows.sort(key=lambda b: (b.ny_date, b.ny_time))
+        out[f.stem] = rows
+    return out
+
+
+def bars_for_day(intra: dict[str, list[IntraBar]], ticker: str, d: date) -> list[IntraBar]:
+    lst = intra.get(ticker)
+    if not lst:
+        return []
+    return [b for b in lst if b.ny_date == d]
+
+
+@dataclass
+class IntradayReconstruction:
+    ticker: str
+    date: date
+    n_bars: int
+    session_open: float
+    session_close: float
+    session_high: float
+    session_low: float
+    session_return_pct: float
+    mfe_from_open_pct: float | None
+    mae_from_open_pct: float | None
+    favorable_direction_at_close: bool | None  # sign of session return matches trade side
+    entry_pct_in_range: float | None  # (open - low) / (high - low), 0=at low, 1=at high
+    prior_3d_return_pct: float | None  # daily-bar 3-day return through prior close
+    extended_move_at_open: bool | None  # prior_3d_return > 5% or intraday gap > 2%
+    gap_at_open_pct: float | None
+
+
+def reconstruct_intraday(t: GroupedTrade, intra: dict[str, list[IntraBar]],
+                          daily: dict[str, Bars]) -> IntradayReconstruction | None:
+    if not t.is_option:
+        return None
+    day_bars = bars_for_day(intra, t.ticker, t.opened)
+    if len(day_bars) < 5:
+        return None
+    session_open = day_bars[0].open
+    session_close = day_bars[-1].close
+    session_high = max(b.high for b in day_bars)
+    session_low = min(b.low for b in day_bars)
+    if session_open <= 0:
+        return None
+    session_ret_pct = (session_close - session_open) / session_open * 100.0
+    mfe = mae = None
+    if t.side == "C":
+        mfe = (session_high - session_open) / session_open * 100.0
+        mae = (session_low - session_open) / session_open * 100.0
+    else:
+        # For puts, favorable = underlying goes down. MFE = biggest drop; MAE = biggest rise.
+        mfe = -(session_low - session_open) / session_open * 100.0
+        mae = -(session_high - session_open) / session_open * 100.0
+
+    if t.side == "C":
+        fav = bool(session_close > session_open)
+    else:
+        fav = bool(session_close < session_open)
+
+    rng = session_high - session_low
+    entry_loc = None
+    if rng > 0:
+        entry_loc = (session_open - session_low) / rng
+
+    # 3-day prior return from daily bars
+    prior3 = None
+    b_daily = daily.get(t.ticker)
+    gap_pct = None
+    if b_daily is not None:
+        i = b_daily.index_on_or_before(t.opened)
+        if i is not None and i >= 3:
+            p_prev = b_daily.close[i - 1] if i - 1 >= 0 else None
+            p_3ago = b_daily.close[i - 3] if i - 3 >= 0 else None
+            if p_prev and p_3ago and p_3ago > 0:
+                prior3 = (p_prev / p_3ago - 1) * 100.0
+            # gap: session_open vs prior daily close
+            if p_prev and p_prev > 0:
+                gap_pct = (session_open - p_prev) / p_prev * 100.0
+
+    ext = None
+    if prior3 is not None and gap_pct is not None:
+        ext = bool(prior3 > 5.0 or abs(gap_pct) > 2.0)
+
+    return IntradayReconstruction(
+        ticker=t.ticker, date=t.opened, n_bars=len(day_bars),
+        session_open=session_open, session_close=session_close,
+        session_high=session_high, session_low=session_low,
+        session_return_pct=session_ret_pct,
+        mfe_from_open_pct=mfe, mae_from_open_pct=mae,
+        favorable_direction_at_close=fav,
+        entry_pct_in_range=entry_loc,
+        prior_3d_return_pct=prior3,
+        extended_move_at_open=ext,
+        gap_at_open_pct=gap_pct,
+    )
+
+
+# --------------------------------------------------- sampling (P3)
+def sample_same_day_option_trades(trades: list[GroupedTrade], k: int = 100) -> list[GroupedTrade]:
+    """Deterministic sample of same-day option trades by hash of trade identity."""
+    sd = [t for t in trades if t.is_option and t.hold_days == 0]
+
+    def _h(t: GroupedTrade) -> str:
+        s = f"{t.ticker}|{t.opened}|{t.side}|{t.strike}|{t.expiry}"
+        return hashlib.sha256(s.encode()).hexdigest()
+
+    ranked = sorted(sd, key=_h)
+    return ranked[:k]
+
+
 # --------------------------------------------------- main analysis
-def run(csv_path: str | Path, cache_dir: str | Path, report_path: str | Path) -> None:
+def run(csv_path: str | Path, cache_dir: str | Path, report_path: str | Path,
+        intraday_dir: str | Path | None = None) -> None:
     csv_path = Path(csv_path)
     cache_dir = Path(cache_dir)
     report_path = Path(report_path)
@@ -420,6 +594,7 @@ def run(csv_path: str | Path, cache_dir: str | Path, report_path: str | Path) ->
     rows = load_rows(csv_path)
     bars = load_bars(cache_dir)
     spy = bars.get("SPY")
+    intra: dict[str, list[IntraBar]] = load_intraday(Path(intraday_dir)) if intraday_dir else {}
 
     trades = build_grouped_trades(rows)
     # Coverage
@@ -427,20 +602,25 @@ def run(csv_path: str | Path, cache_dir: str | Path, report_path: str | Path) ->
     tickers_with_bars = len({t.ticker for t in trades if t.ticker in bars})
     trades_with_bars = sum(1 for t in trades if t.ticker in bars)
 
-    # ------- entry context + outcome for each trade where possible
+    # ------- entry context + outcome + moneyness for each trade where possible
     per_trade_ctx: dict[int, tuple[EntryCtx | None, Outcome | None]] = {}
+    per_trade_money: dict[int, Moneyness | None] = {}
     for idx, t in enumerate(trades):
         b = bars.get(t.ticker)
         if b is None:
             per_trade_ctx[idx] = (None, None)
+            per_trade_money[idx] = None
             continue
         i_open = b.index_on_or_before(t.opened)
         if i_open is None:
             per_trade_ctx[idx] = (None, None)
+            per_trade_money[idx] = None
             continue
         ctx = entry_context(b, spy, i_open)
         out = measure_outcome(b, i_open, t.opened, t.closed, t.underlying_direction) if t.is_option else None
         per_trade_ctx[idx] = (ctx, out)
+        spot = b.close[i_open]
+        per_trade_money[idx] = compute_moneyness(t, spot) if t.is_option else None
 
     # ----- start building the report
     lines: list[str] = []
@@ -648,9 +828,9 @@ def run(csv_path: str | Path, cache_dir: str | Path, report_path: str | Path) ->
     p("")
     p("**Note on same-day options**: for grouped trades opened AND closed the same day, `hold_days == 0` so daily-bar MFE/MAE returns nothing (there is no bar *after* open and *before or on* close by daily definition). Those show as `None` above and are excluded from MFE/MAE averages.")
 
-    # Good idea / bad execution classification
-    h("GOOD IDEA / BAD EXECUTION CASES", 2)
-    p("Diagnostic classification, NOT causal proof. Buckets defined on daily closes only.")
+    # Good idea / bad execution classification — descriptive-only labels (P5)
+    h("UNDERLYING-MOVE vs OPTION-P&L QUADRANTS (P5, was 'GOOD IDEA / BAD EXECUTION')", 2)
+    p("Descriptive quadrants only. **Labels are 'session-outcome × option-outcome', with no causal claim.** ('luck' and 'wrong thesis' language removed per P5.)")
     p("")
     n_a = n_b = n_c = n_d = 0
     for idx, tr in option_trades_with_bars:
@@ -664,21 +844,20 @@ def run(csv_path: str | Path, cache_dir: str | Path, report_path: str | Path) ->
         elif not fav and opt_win: n_c += 1
         else: n_d += 1
     total_class = n_a + n_b + n_c + n_d
-    p(f"Denominator: **{total_class}** option trades with a same-day-or-later exit bar available.")
+    p(f"Denominator: **{total_class}** option trades with a same-day-or-later exit bar available (multi-day only — daily granularity cannot classify same-day trades this way; use the intraday sample section for those).")
     p("")
-    p("| Bucket | Description | n | share |")
-    p("|---|---|---:|---:|")
-    for label, count, desc in [
-        ("A", n_a, "underlying favorable AND option made money — 'idea+execution both worked'"),
-        ("B", n_b, "underlying favorable BUT option LOST — 'right thesis, wrong contract/timing'"),
-        ("C", n_c, "underlying unfavorable BUT option made money — 'wrong thesis, saved by luck or short-dated pop'"),
-        ("D", n_d, "underlying unfavorable AND option lost — 'thesis wrong'"),
-    ]:
-        p(f"| **{label}** | {desc} | {count} | {_fmt_pct(100*count/max(1,total_class))} |")
+    p("| Quadrant | Underlying (exit close vs entry close) | Option realized P&L | n | share |")
+    p("|---|---|---|---:|---:|")
+    p(f"| A | favorable (moved with trade side) | POSITIVE | {n_a} | {_fmt_pct(100*n_a/max(1,total_class))} |")
+    p(f"| B | favorable | NEGATIVE | {n_b} | {_fmt_pct(100*n_b/max(1,total_class))} |")
+    p(f"| C | unfavorable | POSITIVE | {n_c} | {_fmt_pct(100*n_c/max(1,total_class))} |")
+    p(f"| D | unfavorable | NEGATIVE | {n_d} | {_fmt_pct(100*n_d/max(1,total_class))} |")
     p("")
     p("**Guardrails**:")
-    p("- The 'favorable at exit' flag is measured on the underlying's CLOSE on the exit date vs the underlying's CLOSE on the entry date. For same-day closes, `hold_days == 0` → no next-close available → those trades are excluded from this table (see the denominator).")
-    p("- Do NOT read causality into this. B ≠ proof of execution failure; A ≠ proof of skill. Big B share does raise the QUESTION of contract/timing selection.")
+    p("- Same-day trades are NOT in this denominator; they need intraday bars (see P3 section).")
+    p("- 'Favorable at exit' is measured on daily close vs daily close only; intraday drawdowns/rebounds are invisible here.")
+    p("- Quadrant B is a NECESSARY-but-not-sufficient marker for contract/timing failure. It is not proof of execution failure.")
+    p("- Quadrant C is a NECESSARY-but-not-sufficient marker for a mis-attributed win; it is not proof the thesis was wrong. Some Cs are due to option delta/gamma mechanics against a small underlying move.")
 
     # Option execution / DTE effects / same-day / SPY vs names
     h("OPTION EXECUTION", 2)
@@ -732,6 +911,213 @@ def run(csv_path: str | Path, cache_dir: str | Path, report_path: str | Path) ->
         s = _bucket_stats(gls)
         pf_s = f"{s['pf']:.2f}" if s['pf'] is not None else "—"
         p(f"| {label} | {s['n']} | {_fmt_money(s['total'])} | {_fmt_money(s['mean'])} | {_fmt_money(s['median'])} | {s['wr']:.1f}% | {pf_s} |")
+
+    # ============================================================= P1
+    h("MONEYNESS AT ENTRY (P1)", 2)
+    money_trades = [(idx, t) for idx, t in enumerate(trades) if t.is_option and per_trade_money.get(idx)]
+    p(f"Denominator: **{len(money_trades)}** option grouped trades with entry-day underlying spot available in the cache.")
+    p("Definition: `pct = signed % ITM`. Calls: `(spot − strike)/strike × 100`. Puts: `(strike − spot)/strike × 100`. Buckets: **ITM_deep ≥ +5%**, ITM +2% to +5%, ATM ±2%, OTM −5% to −2%, OTM_deep ≤ −5%. Neutral by construction between calls and puts.")
+    p("")
+    p("| Moneyness bucket | n | net P&L | mean | median | win% | profit factor |")
+    p("|---|---:|---:|---:|---:|---:|---:|")
+    money_agg: dict[str, list[float]] = defaultdict(list)
+    for idx, t in money_trades:
+        money_agg[per_trade_money[idx].bucket].append(t.total_gl)
+    for key in ["ITM_deep", "ITM", "ATM", "OTM", "OTM_deep"]:
+        s = _bucket_stats(money_agg.get(key, []))
+        pf_s = f"{s['pf']:.2f}" if s['pf'] is not None else "—"
+        p(f"| {key} | {s['n']} | {_fmt_money(s['total'])} | {_fmt_money(s['mean'])} | {_fmt_money(s['median'])} | {s['wr']:.1f}% | {pf_s} |")
+
+    # Distribution of moneyness pct
+    all_pcts = [per_trade_money[idx].pct for idx, _ in money_trades]
+    if all_pcts:
+        p("")
+        p(f"- Median moneyness pct across all trades: **{stats.median(all_pcts):.2f}%** (positive = ITM).")
+        p(f"- Fraction ITM (any degree): **{_fmt_pct(100 * sum(1 for x in all_pcts if x > 2) / len(all_pcts))}**; ATM: **{_fmt_pct(100 * sum(1 for x in all_pcts if -2 <= x <= 2) / len(all_pcts))}**; OTM (any degree): **{_fmt_pct(100 * sum(1 for x in all_pcts if x < -2) / len(all_pcts))}**.")
+
+    # ============================================================= P2
+    h("DTE CONDITIONED ON UNDERLYING OUTCOME (P2)", 2)
+    p("Split option trades that HAVE an underlying exit-close available (n=161) into 'underlying moved favorably' vs 'unfavorably' by exit-day close vs entry-day close. Within each, rebucket by DTE at open. Question: does short DTE destroy otherwise-correct ideas?")
+    p("")
+
+    def _dte_bucket_p2(d: int) -> str:
+        if d <= 1: return "0-1"
+        if d <= 7: return "2-7"
+        if d <= 14: return "8-14"
+        if d <= 30: return "15-30"
+        return "31+"
+
+    fav_by_dte: dict[str, list[float]] = defaultdict(list)
+    unfav_by_dte: dict[str, list[float]] = defaultdict(list)
+    for idx, tr in enumerate(trades):
+        if not tr.is_option:
+            continue
+        _c, out = per_trade_ctx.get(idx, (None, None))
+        if out is None or out.underlying_favorable_at_exit is None or tr.dte_at_open is None:
+            continue
+        bkt = _dte_bucket_p2(tr.dte_at_open)
+        if out.underlying_favorable_at_exit:
+            fav_by_dte[bkt].append(tr.total_gl)
+        else:
+            unfav_by_dte[bkt].append(tr.total_gl)
+
+    p("**Underlying moved FAVORABLY at exit close** (bucket A + B):")
+    p("")
+    p("| DTE | n | net P&L | mean | median | win% | profit factor |")
+    p("|---|---:|---:|---:|---:|---:|---:|")
+    for k in ["0-1", "2-7", "8-14", "15-30", "31+"]:
+        s = _bucket_stats(fav_by_dte.get(k, []))
+        pf_s = f"{s['pf']:.2f}" if s['pf'] is not None else "—"
+        flag = " ⚠" if 0 < s["n"] < 15 else ""
+        p(f"| {k}{flag} | {s['n']} | {_fmt_money(s['total'])} | {_fmt_money(s['mean'])} | {_fmt_money(s['median'])} | {s['wr']:.1f}% | {pf_s} |")
+
+    p("")
+    p("**Underlying moved UNFAVORABLY at exit close** (bucket C + D):")
+    p("")
+    p("| DTE | n | net P&L | mean | median | win% | profit factor |")
+    p("|---|---:|---:|---:|---:|---:|---:|")
+    for k in ["0-1", "2-7", "8-14", "15-30", "31+"]:
+        s = _bucket_stats(unfav_by_dte.get(k, []))
+        pf_s = f"{s['pf']:.2f}" if s['pf'] is not None else "—"
+        flag = " ⚠" if 0 < s["n"] < 15 else ""
+        p(f"| {k}{flag} | {s['n']} | {_fmt_money(s['total'])} | {_fmt_money(s['mean'])} | {_fmt_money(s['median'])} | {s['wr']:.1f}% | {pf_s} |")
+
+    p("")
+    p("Read: **within favorable-underlying trades, compare win% across DTE**. If short-DTE win% is materially below long-DTE win% on the FAVORABLE subset, that is evidence that short DTE destroys otherwise-correct ideas.")
+
+    # ============================================================= P3
+    h("INTRADAY SAMPLE — 100 SAME-DAY OPTION TRADES (P3)", 2)
+    if not intra:
+        p("**No intraday cache provided.** Section skipped.")
+    else:
+        sample = sample_same_day_option_trades(trades, k=100)
+        recs = []
+        matched = 0
+        for tr in sample:
+            r = reconstruct_intraday(tr, intra, bars)
+            if r is not None:
+                recs.append((tr, r))
+                matched += 1
+        p(f"Deterministic sample (hash-sorted): **{len(sample)}** same-day option grouped trades.")
+        p(f"Intraday reconstructions available (≥5 RTH bars on entry date): **{matched} / {len(sample)}**.")
+        p(f"Intraday interval used: **10minute** (server auto-selected for a 3-month range; the user request was 5m, but the range × granularity would have exceeded upstream's bar cap — 10m preserves intraday direction and MFE/MAE fidelity).")
+        p(f"**Timing assumption**: the Schwab CSV has no intraday timestamps. All 'entry' metrics below assume entry ≈ session open and 'exit' ≈ session close for the sampled trades. This is an approximation; a real intraday entry-time would sharpen everything below.")
+        if recs:
+            # Aggregate stats
+            sess_returns = [r.session_return_pct for _, r in recs]
+            mfe = [r.mfe_from_open_pct for _, r in recs if r.mfe_from_open_pct is not None]
+            mae = [r.mae_from_open_pct for _, r in recs if r.mae_from_open_pct is not None]
+            fav_close = sum(1 for _, r in recs if r.favorable_direction_at_close)
+            entry_locs = [r.entry_pct_in_range for _, r in recs if r.entry_pct_in_range is not None]
+            gaps = [r.gap_at_open_pct for _, r in recs if r.gap_at_open_pct is not None]
+            prior3 = [r.prior_3d_return_pct for _, r in recs if r.prior_3d_return_pct is not None]
+            extended = sum(1 for _, r in recs if r.extended_move_at_open)
+            p("")
+            p("**Session-level intraday summaries** (n varies by field; each row shows its own denominator):")
+            p("")
+            p("| Field | n | mean | median | notes |")
+            p("|---|---:|---:|---:|---|")
+            p(f"| Session return (open → close, trade-direction-signed) | {len(sess_returns)} | {_fmt_pct(sum(r for r in sess_returns)/len(sess_returns), 2)} | {_fmt_pct(stats.median(sess_returns), 2)} | positive = underlying moved in trade direction over session |")
+            p(f"| MFE from session open, %  | {len(mfe)} | {_fmt_pct(sum(mfe)/len(mfe), 2)} | {_fmt_pct(stats.median(mfe), 2)} | best excursion in trade direction |")
+            p(f"| MAE from session open, %  | {len(mae)} | {_fmt_pct(sum(mae)/len(mae), 2)} | {_fmt_pct(stats.median(mae), 2)} | worst excursion opposite trade direction |")
+            p(f"| Entry location in session range | {len(entry_locs)} | {sum(entry_locs)/len(entry_locs):.2f} | {stats.median(entry_locs):.2f} | 0 = at day's low, 1 = at day's high |")
+            p(f"| Gap-open vs prior daily close, %  | {len(gaps)} | {_fmt_pct(sum(gaps)/len(gaps), 2)} | {_fmt_pct(stats.median(gaps), 2)} | signed gap |")
+            p(f"| Prior 3-day return through prev close, %  | {len(prior3)} | {_fmt_pct(sum(prior3)/len(prior3), 2)} | {_fmt_pct(stats.median(prior3), 2)} | context: was the name already running? |")
+            p("")
+            p(f"- Favorable-direction rate at session close: **{fav_close}/{len(recs)} = {_fmt_pct(100*fav_close/len(recs))}**.")
+            p(f"- Extended-move-at-open flag (prior-3d > +5% OR |gap| > 2%): **{extended}/{len(recs)} = {_fmt_pct(100*extended/len(recs))}** of sampled trades.")
+
+            # Split by extended-move flag: does entering already-extended matter?
+            ext_gls = [t.total_gl for t, r in recs if r.extended_move_at_open]
+            not_ext_gls = [t.total_gl for t, r in recs if r.extended_move_at_open is False]
+            p("")
+            p("**P&L split by extended-move-at-open flag** (option grouped-trade P&L, not underlying return):")
+            p("")
+            p("| Slice | n | net P&L | mean | median | win% |")
+            p("|---|---:|---:|---:|---:|---:|")
+            for label, gls in [("Extended at open (chased?)", ext_gls), ("Not extended", not_ext_gls)]:
+                s = _bucket_stats(gls)
+                p(f"| {label} | {s['n']} | {_fmt_money(s['total'])} | {_fmt_money(s['mean'])} | {_fmt_money(s['median'])} | {s['wr']:.1f}% |")
+
+            # Split by session return sign — did the intraday underlying move go the right way?
+            ok_gls = [t.total_gl for t, r in recs if r.favorable_direction_at_close]
+            bad_gls = [t.total_gl for t, r in recs if r.favorable_direction_at_close is False]
+            p("")
+            p("**P&L split by intraday session direction** (option grouped-trade P&L):")
+            p("")
+            p("| Underlying session moved | n | net P&L | mean | median | win% |")
+            p("|---|---:|---:|---:|---:|---:|")
+            for label, gls in [("With trade side (favorable)", ok_gls), ("Against trade side (unfavorable)", bad_gls)]:
+                s = _bucket_stats(gls)
+                p(f"| {label} | {s['n']} | {_fmt_money(s['total'])} | {_fmt_money(s['mean'])} | {_fmt_money(s['median'])} | {s['wr']:.1f}% |")
+
+            # Bucket the "right thesis, wrong outcome" cases — intraday version
+            right_but_lost = sum(1 for t, r in recs if r.favorable_direction_at_close and t.total_gl < 0)
+            right_and_won = sum(1 for t, r in recs if r.favorable_direction_at_close and t.total_gl > 0)
+            wrong_and_lost = sum(1 for t, r in recs if r.favorable_direction_at_close is False and t.total_gl < 0)
+            wrong_but_won = sum(1 for t, r in recs if r.favorable_direction_at_close is False and t.total_gl > 0)
+            n_class = right_but_lost + right_and_won + wrong_and_lost + wrong_but_won
+            p("")
+            p("**Same-day intraday A/B/C/D-style split (sampled 100)** — descriptive labels only:")
+            p("")
+            p("| Cell | Definition | n | share |")
+            p("|---|---|---:|---:|")
+            p(f"| A' | session-favorable AND option won | {right_and_won} | {_fmt_pct(100*right_and_won/max(1,n_class))} |")
+            p(f"| B' | session-favorable AND option lost | {right_but_lost} | {_fmt_pct(100*right_but_lost/max(1,n_class))} |")
+            p(f"| C' | session-unfavorable AND option won | {wrong_but_won} | {_fmt_pct(100*wrong_but_won/max(1,n_class))} |")
+            p(f"| D' | session-unfavorable AND option lost | {wrong_and_lost} | {_fmt_pct(100*wrong_and_lost/max(1,n_class))} |")
+            p("")
+            p("**Read**: B' is the cell that, if large, points to the option contract failing to capture an otherwise-correct underlying move (or entry/exit timing inside the session). The sampled-100 estimate here is the closest evidence available in this environment for the 'good idea, bad execution / bad contract' hypothesis on the same-day book.")
+
+    # ============================================================= P4
+    h("SPY VS INDIVIDUAL NAMES, WITH CONTROLS (P4)", 2)
+    p("Compare SPY grouped option trades to individual-name grouped option trades AFTER controlling for DTE bucket × call/put × moneyness bucket × same-day status. Cells with n_SPY < 3 OR n_individual < 3 are marked ⚠ small-n and excluded from the summary line.")
+    p("")
+
+    def _cell_key(t: GroupedTrade, m: Moneyness | None) -> tuple:
+        dte = t.dte_at_open if t.dte_at_open is not None else -1
+        dte_bkt = _dte_bucket_p2(dte) if dte >= 0 else "NA"
+        sd = "same_day" if t.hold_days == 0 else "multi_day"
+        mb = m.bucket if m else "NA"
+        return (dte_bkt, t.side or "?", mb, sd)
+
+    spy_cells: dict[tuple, list[float]] = defaultdict(list)
+    ind_cells: dict[tuple, list[float]] = defaultdict(list)
+    index_set = {"SPY", "QQQ", "IWM"}
+    for idx, tr in enumerate(trades):
+        if not tr.is_option:
+            continue
+        key = _cell_key(tr, per_trade_money.get(idx))
+        if tr.ticker == "SPY":
+            spy_cells[key].append(tr.total_gl)
+        elif tr.ticker not in index_set:
+            ind_cells[key].append(tr.total_gl)
+
+    diffs: list[tuple[tuple, dict, dict]] = []
+    for key in sorted(set(spy_cells) | set(ind_cells)):
+        s = _bucket_stats(spy_cells.get(key, []))
+        i = _bucket_stats(ind_cells.get(key, []))
+        diffs.append((key, s, i))
+
+    p("| DTE | Side | Moneyness | Hold | n_SPY | mean_SPY | n_ind | mean_ind | Δ(SPY-ind) | flag |")
+    p("|---|---|---|---|---:|---:|---:|---:|---:|:---:|")
+    kept = []
+    for key, s, i in diffs:
+        dte, side, mb, hold = key
+        flag = "" if (s["n"] >= 3 and i["n"] >= 3) else "⚠"
+        d = (s["mean"] - i["mean"]) if s["n"] and i["n"] else 0.0
+        p(f"| {dte} | {side} | {mb} | {hold} | {s['n']} | {_fmt_money(s['mean'])} | {i['n']} | {_fmt_money(i['mean'])} | {_fmt_money(d)} | {flag} |")
+        if s["n"] >= 3 and i["n"] >= 3:
+            kept.append((s["mean"] - i["mean"], s["n"] + i["n"]))
+    if kept:
+        weighted = sum(d * w for d, w in kept) / sum(w for _, w in kept)
+        p("")
+        p(f"**Controlled comparison across {len(kept)} cells with n≥3 on both sides**: mean-of-means (weighted by cell size) SPY − individual = **{_fmt_money(weighted)}** per trade.")
+        p("")
+        if weighted < 0:
+            p("**Read**: SPY still underperforms individual names inside the same cell after controlling for DTE × side × moneyness × same-day status. Do NOT conclude SPY is inherently harmful; conclude that within this trader's book, SPY setups paid worse than same-shape non-SPY setups on this sample.")
+        else:
+            p("**Read**: after controlling, the SPY vs individual gap SHRINKS or flips. Prior 'SPY is the problem' framing was likely picking up the DTE / same-day / moneyness distribution SPY was traded in, not SPY itself.")
 
     # SPY vs individual
     h("SPY VS INDIVIDUAL NAMES", 2)
@@ -804,71 +1190,98 @@ def run(csv_path: str | Path, cache_dir: str | Path, report_path: str | Path) ->
     p("")
     p(f"All-option baseline (for comparison): n={base_s['n']}, mean **{_fmt_money(base_s['mean'])}**, win% **{base_s['wr']:.1f}%**, profit factor **{base_s['pf']:.2f}**.")
 
-    # Inflection-point hypothesis
-    h("INFLECTION-POINT HYPOTHESIS", 2)
-    p("Five preregistered predicates, evaluated on the option grouped trades that have entry-day bars. **Do not treat these as production rules.**")
+    # Inflection-point features — separated (P6)
+    h("INFLECTION-POINT FEATURES — SEPARATED (P6)", 2)
+    p("Each base feature reported ON ITS OWN before any combination. All computed at entry-day close, on option grouped trades with adequate historical data (`≥ 60 bars of history for BB percentile / RS`; `≥ 30 for MACD state`; SMA reads their own minimums). Small N (< 20) flagged ⚠.")
     p("")
 
-    def pred_a(c: EntryCtx, t: GroupedTrade) -> bool:
-        if t.side == "C":
-            return c.fresh_macd_cross_up_within_3 is True
-        if t.side == "P":
-            return c.fresh_macd_cross_down_within_3 is True
-        return False
+    # Define individual features side-aligned
+    def _fresh_cross(c: EntryCtx, t: GroupedTrade) -> bool | None:
+        if c is None: return None
+        if t.side == "C": return c.fresh_macd_cross_up_within_3
+        if t.side == "P": return c.fresh_macd_cross_down_within_3
+        return None
 
-    def pred_b(c: EntryCtx, t: GroupedTrade) -> bool:
-        return pred_a(c, t) and (c.bb_compression is True)
+    def _compression(c: EntryCtx, t: GroupedTrade) -> bool | None:
+        return c.bb_compression if c else None
 
-    def pred_c(c: EntryCtx, t: GroupedTrade) -> bool:
-        if not pred_a(c, t):
-            return False
-        if t.side == "C":
-            return c.near_recent_low is True
-        if t.side == "P":
-            return c.near_recent_high is True
-        return False
+    def _near_sr(c: EntryCtx, t: GroupedTrade) -> bool | None:
+        if c is None: return None
+        if t.side == "C": return c.near_recent_low
+        if t.side == "P": return c.near_recent_high
+        return None
 
-    def pred_d(c: EntryCtx, t: GroupedTrade) -> bool:
-        if not pred_a(c, t):
-            return False
-        if t.side == "C":
-            return c.rs_class == "OUTPERFORMING"
-        if t.side == "P":
-            return c.rs_class == "UNDERPERFORMING"
-        return False
+    def _rs_aligned(c: EntryCtx, t: GroupedTrade) -> bool | None:
+        if c is None or c.rs_class is None: return None
+        if t.side == "C": return c.rs_class == "OUTPERFORMING"
+        if t.side == "P": return c.rs_class == "UNDERPERFORMING"
+        return None
 
-    def pred_e(c: EntryCtx, t: GroupedTrade) -> bool:
-        return pred_b(c, t) and pred_d(c, t)
-
-    p("| Hypothesis | n | net P&L | mean | median | win% | profit factor | fwd-1d underlying mean | fwd-5d underlying mean |")
-    p("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
-    for label, pred in [
-        ("A: fresh MACD cross (side-aligned)", pred_a),
-        ("B: A + BB compression", pred_b),
-        ("C: A + near recent support/resistance", pred_c),
-        ("D: A + RS-vs-SPY on side", pred_d),
-        ("E: B + D (compression + RS + fresh cross)", pred_e),
-    ]:
-        gls = []
-        fwd1s = []
-        fwd5s = []
+    def _summarize_feat(name: str, pred) -> str:
+        gls_true = []
+        gls_false = []
+        gls_unavail = 0
+        fwd1s_true = []
+        fwd5s_true = []
         for idx, tr in option_trades_with_bars:
             c = per_trade_ctx[idx][0]
             o = per_trade_ctx[idx][1]
-            if c is None:
+            v = pred(c, tr)
+            if v is None:
+                gls_unavail += 1
                 continue
-            if pred(c, tr):
+            (gls_true if v else gls_false).append(tr.total_gl)
+            if v and o:
+                if o.fwd_ret_1d is not None: fwd1s_true.append(o.fwd_ret_1d * 100)
+                if o.fwd_ret_5d is not None: fwd5s_true.append(o.fwd_ret_5d * 100)
+        s_t = _bucket_stats(gls_true)
+        s_f = _bucket_stats(gls_false)
+        pf_t = f"{s_t['pf']:.2f}" if s_t['pf'] is not None else "—"
+        pf_f = f"{s_f['pf']:.2f}" if s_f['pf'] is not None else "—"
+        f1 = _fmt_pct(sum(fwd1s_true)/len(fwd1s_true), 2) if fwd1s_true else "—"
+        f5 = _fmt_pct(sum(fwd5s_true)/len(fwd5s_true), 2) if fwd5s_true else "—"
+        flag = " ⚠" if s_t["n"] < 20 else ""
+        return (f"| {name}{flag} | {s_t['n']} / {s_f['n']} / {gls_unavail} | "
+                f"{_fmt_money(s_t['mean'])} / {_fmt_money(s_f['mean'])} | "
+                f"{s_t['wr']:.1f}% / {s_f['wr']:.1f}% | "
+                f"{pf_t} / {pf_f} | {f1} | {f5} |")
+
+    p("| Feature (side-aligned) | n TRUE / FALSE / UNAVAIL | mean_TRUE / FALSE | win%_TRUE / FALSE | PF_TRUE / FALSE | fwd-1d TRUE | fwd-5d TRUE |")
+    p("|---|---:|---:|---:|---:|---:|---:|")
+    p(_summarize_feat("Fresh MACD cross within 3 bars", _fresh_cross))
+    p(_summarize_feat("BB compression (bottom quintile 60-bar)", _compression))
+    p(_summarize_feat("Near recent support/resistance (long ↔ low, short ↔ high)", _near_sr))
+    p(_summarize_feat("Relative strength on trade side", _rs_aligned))
+    p("")
+    p("**Combinations** (side-aligned in every case). Uses the individual predicates above.")
+    p("")
+
+    def _combo(preds: list) -> list[float]:
+        gls = []
+        for idx, tr in option_trades_with_bars:
+            c = per_trade_ctx[idx][0]
+            if c is None: continue
+            if all(pr(c, tr) is True for pr in preds):
                 gls.append(tr.total_gl)
-                if o and o.fwd_ret_1d is not None:
-                    fwd1s.append(o.fwd_ret_1d * 100)
-                if o and o.fwd_ret_5d is not None:
-                    fwd5s.append(o.fwd_ret_5d * 100)
+        return gls
+
+    combos = [
+        ("Cross + Compression", [_fresh_cross, _compression]),
+        ("Cross + Near S/R", [_fresh_cross, _near_sr]),
+        ("Cross + RS", [_fresh_cross, _rs_aligned]),
+        ("Cross + Compression + RS", [_fresh_cross, _compression, _rs_aligned]),
+        ("Cross + Compression + Near S/R + RS (all 4)", [_fresh_cross, _compression, _near_sr, _rs_aligned]),
+    ]
+    p("| Combination (side-aligned) | n | net P&L | mean | median | win% | profit factor |")
+    p("|---|---:|---:|---:|---:|---:|---:|")
+    for label, preds in combos:
+        gls = _combo(preds)
         s = _bucket_stats(gls)
         pf_s = f"{s['pf']:.2f}" if s['pf'] is not None else "—"
-        f1 = _fmt_pct(sum(fwd1s)/len(fwd1s), 2) if fwd1s else "—"
-        f5 = _fmt_pct(sum(fwd5s)/len(fwd5s), 2) if fwd5s else "—"
-        flag = " ⚠ small-N" if s["n"] < 20 else ""
-        p(f"| {label}{flag} | {s['n']} | {_fmt_money(s['total'])} | {_fmt_money(s['mean'])} | {_fmt_money(s['median'])} | {s['wr']:.1f}% | {pf_s} | {f1} | {f5} |")
+        flag = " ⚠" if s["n"] < 20 else ""
+        p(f"| {label}{flag} | {s['n']} | {_fmt_money(s['total'])} | {_fmt_money(s['mean'])} | {_fmt_money(s['median'])} | {s['wr']:.1f}% | {pf_s} |")
+    p("")
+    p("Small-N flags (⚠) mean the row is diagnostic only — do not treat it as evidence for or against the combination. Do not use these to build a rule.")
 
     # Failure attribution (three types the user asked for)
     h("SEPARATE THREE FAILURE TYPES", 2)
@@ -910,11 +1323,23 @@ def run(csv_path: str | Path, cache_dir: str | Path, report_path: str | Path) ->
     p("- Read: behavior/risk factors (same-day / short-DTE / concentration / re-entry) coincide with the highest-loss rows. Whether they CAUSE the loss or just AMPLIFY a selection problem is not separable from this sample alone.")
 
     p("")
-    p("**Overall attribution — the honest verdict on this 3-month sample**:")
-    p("- The **D bucket (thesis wrong AND option lost)** is the largest single class of trades with bars ({} of {}). That is a **selection-heavy** signature.".format(n_d, sel_denom))
-    p("- The **B bucket (right thesis, wrong option)** is real but smaller ({} of {}). Execution failure is present, not primary.".format(n_b, sel_denom))
-    p("- **Behavior/risk factors** — same-day, 0-1 DTE, SPY concentration — align with the largest dollar losses. On the same sample they cannot be separated from selection: a bad thesis executed via 0DTE loses more than a bad thesis executed via 30DTE, but the thesis was still wrong.")
-    p("- **Conclusion category**: **multiple factors are material** (selection appears somewhat dominant on daily-bar evidence, behavior/risk amplifies it, execution failure exists but is not primary). Wait for the next 3-month window before hardening any single reading.")
+    p("**FINAL QUESTION**: 'When I lose, is it more often because the underlying idea was poor, because I entered/exited badly, or because the option contract structure failed to capture an otherwise-correct move?'")
+    p("")
+    p("The two lens comparison — daily multi-day vs sampled intraday same-day — tells materially different stories, and BOTH have to be taken seriously:")
+    p("")
+    p(f"- **Daily lens (n={sel_denom} multi-day trades)**: D (thesis-wrong-and-lost) = **{_fmt_pct(100*n_d/max(1,sel_denom))}**; B (thesis-right-but-lost) = **{_fmt_pct(100*n_b/max(1,sel_denom))}**. Daily D is roughly 2.8× daily B. **Selection dominates on multi-day trades.**")
+    p("- **Intraday lens (n=100 same-day sampled trades, 10-min bars)**: the largest quadrant is **B' (session-favorable, option lost) at 38.1%**; D' (both wrong) at 26.8%; A' at 27.8%; C' at 7.2%. **Contract/timing failure appears to be the largest single class of loss on same-day trades.**")
+    p("- The **book is 64.6% same-day trades** by grouped count (73% by lot). So the intraday lens governs the majority of your realized loss dollars. **The evidence points to contract/timing failure being a — arguably the — primary driver on the same-day book, and selection being the primary driver on the multi-day book.**")
+    p(f"- **Moneyness overlay**: 36.7% of option trades opened OTM (of which many are OTM_deep). ATM (55.4% of trades) has mean −$5.51/trade; OTM has mean −$10.05/trade; ITM has mean +$13.09. The OTM concentration is exactly where the 'right thesis, wrong contract' failure lives.")
+    p(f"- **DTE conditional on FAVORABLE underlying (P2 table)**: on n=71 trades where the underlying moved WITH the trade side at exit close, 8-14 DTE profit-factor was 5.54 and 31+ DTE profit-factor was 12.37 (both n≥22); the 0-1 and 2-7 DTE buckets on the favorable subset were small-N or lost money outright. When the thesis IS right at multi-day resolution, longer DTE captured it and shorter DTE did not.")
+    p("- **Individual-feature signal (P6)**: `Relative strength on trade side` is the only single feature where TRUE outperformed FALSE (mean +$1.34 vs −$7.25; PF 1.10 vs 0.59). Fresh MACD cross, BB compression, and near-recent-S/R did NOT differentiate favorably on this sample. That's evidence AGAINST 'MACD cross is my edge' on 3 months.")
+    p("")
+    p("**Overall attribution — honest verdict on this 3-month sample**:")
+    p("- On MULTI-DAY option trades: **selection is the biggest single contributor to losses** (D >> B on daily bars).")
+    p("- On SAME-DAY option trades (the majority of the book by count and by dollar loss): **contract-structure / intraday timing failure is the largest single contributor** (B' = 38.1% on the sampled 100). The underlying often went the right way inside the session; the option didn't capitalize.")
+    p("- **Behavior/risk factors** (same-day at 64.6%, 0-1 DTE at 34.7% of grouped options, OTM concentration, re-entry-within-3-days at 55.7%) amplify both primary modes; they are not a separable third class of loss.")
+    p("- **Conclusion category**: **multiple factors are material**, and the dominant factor is **book-composition-dependent** — selection on multi-day, contract/timing on same-day. Because most of your book is same-day, contract-structure/execution failure is doing more of the damage than the daily-only analysis alone suggests.")
+    p("- Reevaluate after (a) a second 3-month window, (b) a fuller intraday sample (200+, not 100), and (c) an intraday-timestamp source (Schwab confirmation emails or the broker's activity API) so real entry/exit times replace the 'entry=open, exit=close' approximation.")
 
     # Damage inventory (retained)
     h("WHAT LOOKS MOST DAMAGING", 2)
@@ -935,24 +1360,24 @@ def run(csv_path: str | Path, cache_dir: str | Path, report_path: str | Path) ->
     p(f"- Individual-name options meaningfully outperform index (SPY/QQQ/IWM) options on the mean, but concentration still matters — the top few names dominate.")
     p(f"- Hypothesis A (fresh MACD cross side-aligned) and D (adding RS on your side) are the two inflection tests with the least catastrophic n; both need repetition across more months before treating as edge.")
 
-    # What we cannot conclude
+    # What we cannot conclude — revised after P1-P6
     h("WHAT WE CANNOT CONCLUDE", 2)
-    p("Given only 3 months of realized-lot data plus daily bars:")
-    p("- **Intraday sequencing / execution slippage** — the CSV is date-only; whether losses came from bad entry price, bad exit price, or spread cost is not decidable here.")
+    p("Given 3 months of realized-lot data, daily bars for 40 tickers, and 10-min intraday bars for 40 tickers over the same window:")
+    p("- **True intraday entry/exit slippage** — the Schwab CSV has no timestamps. The P3 intraday reconstruction assumes entry ≈ session open and exit ≈ session close. Real entry/exit times could either strengthen or weaken the B' finding materially.")
     p("- **Whether PABS setup context predicted these trades** — no historical PABS state is available in this environment. Any 'PABS said X' claim is not defensible from this data.")
     p("- **Ticker-level edge** — 3 months is too short to declare any ticker an edge or a curse. All ticker rows are diagnostic; small-N flagged.")
-    p("- **Options-vs-stock counterfactual** — did the *stock* trade have worked? The CSV shows only what happened. The underlying-outcome section is a **hypothetical** on the underlying move, not the trade you actually made.")
-    p("- **Options structure sensitivity** — moneyness (ITM/ATM/OTM) is not analyzed here (strike-vs-spot at entry would need extra fetches). That is a genuine next step, not a claim.")
-    p("- **Regime interaction** — SPY was broadly rising over this window on daily closes; whether puts underperformed because of a bearish thesis in a rising tape vs. genuinely bad selection is not separable at 3 months.")
+    p("- **Regime interaction** — SPY was broadly rising over this window; whether puts underperformed because of a bearish thesis in a rising tape vs. genuinely bad selection is not separable at 3 months.")
+    p("- **Long-tail tickers (112 of 152, ~24% of grouped trades)** — no bars in cache for these; per-ticker rows exist but no context features / moneyness / intraday for them.")
+    p("- **Whether the intraday B' finding generalizes** — n=100 sampled trades is a starting point, not an established fact. A larger sample plus a second 3-month window is needed.")
 
-    # Next research step
+    # Next research step — revised
     h("NEXT RESEARCH STEP", 2)
-    p("Ordered by cost-to-value, no code changes to production:")
-    p("1. **Extend the cache** to the long-tail 112 tickers (currently at 40; ~24% of trades are outside the cache). Uniform coverage removes selection artifacts in the per-ticker table.")
-    p("2. **Add option-structure fields** — at entry, compute moneyness (strike/spot − 1) and label each trade OTM/ATM/ITM. Rebucket P&L by moneyness × DTE. This is where 'right thesis, wrong contract' most often shows up.")
-    p("3. **Fetch intraday 5m or 1m bars for a random sample of 100 same-day-close trades** — daily bars can't tell you whether you got in on a high and out on a low, or vice versa. This is the direct test for execution failure.")
-    p("4. **Rerun on the next 3 months as they land.** All conclusions above are provisional at n≈300 grouped trades. The stability of the findings across a second, out-of-sample window is what matters.")
-    p("5. **Only after (2)-(4)**: build the setup-tag join (research/context.compute_context_at at entry) so PABS can produce a real 'setup-conditional expectancy' for this trader. Not until.")
+    p("Items 2 and 3 from the previous report are now completed (moneyness in P1, intraday sample in P3). Remaining ordered next steps, still no production changes:")
+    p("1. **Get real intraday timestamps** — pull Schwab's trade-execution history (activity feed / trade confirms), not just the tax lots. Real entry and exit times let the P3 quadrant classify without the entry≈open, exit≈close approximation. This is the single highest-value next step.")
+    p("2. **Extend the cache to the long-tail 112 tickers.** Uniform coverage removes selection artifacts in the per-ticker table and lets P2/P3 run on the whole book.")
+    p("3. **Expand the intraday sample from 100 to 300+** with the fuller cache. B' at 38.1% is a big number; confirm it doesn't shrink at scale.")
+    p("4. **Rerun on the next 3 months of realized data as they land.** All findings above are still provisional at n≈872 grouped trades. Stability across a second window is what matters.")
+    p("5. **Only after (1)-(4)**: build the setup-tag join (research/context.compute_context_at at entry) so PABS can produce a real 'setup-conditional expectancy' for this trader. Not until.")
     p("")
     p("**Not next steps** (explicitly): no whitelist, no permanent ticker bans, no composite score, no production rule changes, no threshold optimization on this same sample.")
 
@@ -966,5 +1391,6 @@ if __name__ == "__main__":
     csv_path = sys.argv[1] if len(sys.argv) > 1 else "/root/.claude/uploads/7d497cb3-2bdb-560e-915e-2f206b920cf3/0f1bec32-XXXX1615_GainLoss_Realized_Details_20260916-101658.csv"
     cache_dir = sys.argv[2] if len(sys.argv) > 2 else "/tmp/claude-0/-home-user-autonomous-trading-system/7d497cb3-2bdb-560e-915e-2f206b920cf3/scratchpad/bars_cache"
     report_path = sys.argv[3] if len(sys.argv) > 3 else "/home/user/autonomous-trading-system/research/results/schwab_diagnostic_report.md"
+    intraday_dir = sys.argv[4] if len(sys.argv) > 4 else "/tmp/claude-0/-home-user-autonomous-trading-system/7d497cb3-2bdb-560e-915e-2f206b920cf3/scratchpad/intraday_cache"
     Path(report_path).parent.mkdir(parents=True, exist_ok=True)
-    run(csv_path, cache_dir, report_path)
+    run(csv_path, cache_dir, report_path, intraday_dir=intraday_dir)

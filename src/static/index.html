@@ -11,8 +11,8 @@
     <div class="brand">pabs<span class="brand-dot">.</span>trading</div>
     <nav class="navtabs">
       <button class="navtab active" data-view="dashboard">Dashboard</button>
-      <button class="navtab" data-view="track">Track Record</button>
       <button class="navtab" data-view="sectors">Sectors</button>
+      <button class="navtab" data-view="track">Track Record</button>
       <button class="navtab" data-view="more">More</button>
     </nav>
     <span id="engine-status" class="engine-status" title="The system scans and manages trades on its own">● Autonomous engine</span>
@@ -24,7 +24,7 @@
       <div class="block-head"><h2>Market Context</h2><span class="sub" id="mkt-asof"></span></div>
       <div id="market-tiles" class="mkt-tiles">Loading…</div>
       <div class="mkt-lower">
-        <div class="mkt-col"><h4>What's coming</h4><div id="mkt-calendar"></div></div>
+        <div class="mkt-col"><h4>Earnings ahead</h4><div id="mkt-calendar"></div></div>
         <div class="mkt-col"><h4>Market news</h4><div id="mkt-news"></div></div>
       </div>
     </section>
@@ -73,7 +73,6 @@
   <!-- ===================== MORE (detailed panels) ===================== -->
   <main id="view-more" class="view">
     <section class="grid-top">
-      <div class="card" id="regime-card"><h2>Market Regime</h2><div id="regime-content">Loading...</div></div>
       <div class="card" id="accounts-card"><h2>Accounts</h2><div id="accounts-content">Loading...</div></div>
       <div class="card" id="performance-card"><h2>Performance</h2><div id="performance-content">Loading...</div></div>
     </section>
@@ -93,10 +92,10 @@
     </section>
 
     <section class="card">
-      <h2>Open Trades &amp; Positions</h2>
+      <h2>Open Trades</h2>
       <h3>Live book <span class="hint">(marked to Alpaca's real-time feed; bar-age stamped)</span></h3>
       <div id="paper-open-content">Loading...</div>
-      <h3 style="margin-top:18px">Approved / executed positions</h3>
+      <h3 style="margin-top:18px">Recent broker trades <span class="hint">(approved proposals, executed via Robinhood)</span></h3>
       <div id="trades-content">Loading...</div>
     </section>
   </main>

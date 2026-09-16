@@ -263,6 +263,7 @@ tbody tr:hover { background: rgba(255,255,255,0.03); }
 .biastag-bull { color: var(--green); background: rgba(46,204,113,0.16); }
 .biastag-bear { color: var(--red); background: rgba(231,76,60,0.16); }
 .biastag-neut { color: var(--yellow); background: rgba(241,196,15,0.16); }
+.biastag-none { color: var(--muted); background: rgba(255,255,255,0.05); border: 1px dashed var(--border); }
 
 /* sector strength board */
 .board { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
@@ -322,7 +323,10 @@ table.livebook td { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .mtile:hover { border-color: #3a4152; }
 .mt-tk { font-size: 12px; font-weight: 700; color: var(--muted); }
 .mt-val { font-size: 20px; font-weight: 700; margin: 4px 0 2px; font-variant-numeric: tabular-nums; }
+.mt-val-sm { font-size: 14px; font-weight: 600; margin: 4px 0 2px; }
 .mt-sub { font-size: 12px; font-weight: 600; }
+.mt-sub.muted, .mt-val.muted { font-weight: 500; }
+.mtile .regime-badge { margin: 4px 0 2px; }
 .mkt-lower { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .mkt-col { background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
 .mkt-col h4 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; }

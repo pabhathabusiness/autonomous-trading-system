@@ -11,6 +11,7 @@ supplementary columns.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from datetime import datetime, timezone
@@ -23,6 +24,37 @@ from .cells import Cell
 
 
 N_WARN = 30
+BOOTSTRAP_N = 1000
+BOOTSTRAP_CI = 0.95
+
+
+def _bootstrap_seed(run_id: str, cell_name: str) -> int:
+    """Deterministic per-cell seed derived from run_id + cell name."""
+    h = hashlib.sha256(f"{run_id}|{cell_name}".encode()).digest()
+    return int.from_bytes(h[:4], "big")
+
+
+def _bootstrap_ci(values: np.ndarray, *, seed: int,
+                  stat_fn, n_boot: int = BOOTSTRAP_N,
+                  ci: float = BOOTSTRAP_CI) -> tuple[float, float]:
+    """Percentile bootstrap CI on `stat_fn(values)`.
+
+    Returns (low, high). NaN pair if n < N_WARN or values is empty.
+    """
+    values = np.asarray(values, dtype=float)
+    values = values[~np.isnan(values)]
+    if len(values) < N_WARN:
+        return float("nan"), float("nan")
+    rng = np.random.default_rng(seed)
+    stats = np.empty(n_boot)
+    n = len(values)
+    for i in range(n_boot):
+        idx = rng.integers(0, n, size=n)
+        stats[i] = stat_fn(values[idx])
+    lo_q = (1 - ci) / 2
+    hi_q = 1 - lo_q
+    lo, hi = np.quantile(stats, [lo_q, hi_q])
+    return round(float(lo), 3), round(float(hi), 3)
 
 
 def _features_dict(row: pd.Series) -> dict:
@@ -54,7 +86,8 @@ def _median(x: pd.Series) -> float:
     return round(float(x.median()), 3)
 
 
-def _stats_for(sub: pd.DataFrame) -> dict:
+def _stats_for(sub: pd.DataFrame, *, run_id: str = "unknown",
+               cell_name: str = "cell") -> dict:
     n_total = len(sub)
     if n_total == 0:
         return _empty_stats()
@@ -63,6 +96,7 @@ def _stats_for(sub: pd.DataFrame) -> dict:
     # gap-through-stop / gap-through-target rates over the whole subset
     n_gap_stop = int((sub["feat_entry_gap_flag"] == "gap_through_stop").sum())
     n_gap_target = int((sub["feat_entry_gap_flag"] == "gap_through_target").sum())
+    gap_rate = _rate(n_gap_stop + n_gap_target, n_total)
 
     # Primary set = clean-gap rows only. Gap rows are excluded from primary.
     primary_set = sub[is_clean]
@@ -86,6 +120,25 @@ def _stats_for(sub: pd.DataFrame) -> dict:
     mean_R_conservative = _mean(primary_set["r_multiple_conservative"])
     mean_R_optimistic = _mean(primary_set["r_multiple_optimistic"])
     median_R_primary = _median(primary_set["r_multiple"])
+    total_R = float(round(primary_set["r_multiple"].dropna().sum(), 3)) if not primary_set.empty else 0.0
+
+    # ---- Bootstrap CIs (deterministic seed per cell)
+    seed = _bootstrap_seed(run_id, cell_name)
+    scoreable_r = primary_set.loc[primary_set["outcome"].isin(["win", "loss", "timeout"]), "r_multiple"].to_numpy()
+    expectancy_ci_lo, expectancy_ci_hi = _bootstrap_ci(
+        scoreable_r, seed=seed, stat_fn=np.mean,
+    )
+    # Win rate CI uses a 0/1 vector on scoreable rows
+    if len(scoreable_r) >= N_WARN:
+        wins_vec = np.array(
+            [1.0 if o == "win" else 0.0
+             for o in primary_set.loc[primary_set["outcome"].isin(["win", "loss", "timeout"]), "outcome"]]
+        )
+        wr_lo, wr_hi = _bootstrap_ci(
+            wins_vec, seed=seed + 1, stat_fn=lambda x: float(x.mean() * 100.0),
+        )
+    else:
+        wr_lo, wr_hi = float("nan"), float("nan")
 
     # Layer-2 regime split (primary set)
     regime_split_raw = primary_set["regime_semantic"].value_counts().to_dict()
@@ -97,16 +150,25 @@ def _stats_for(sub: pd.DataFrame) -> dict:
         "n_win": n_win, "n_loss": n_loss,
         "n_ambiguous": n_ambig, "n_timeout": n_timeout,
         "n_scoreable": n_scoreable,
+        "resolved_n": n_scoreable,
         "primary_2R_pct": primary_pct,
         "conservative_2R_pct": conservative_pct,
         "optimistic_2R_pct": optimistic_pct,
         "ambiguous_rate": ambig_rate,
+        "gap_rate": gap_rate,
         "gap_through_stop_rate": _rate(n_gap_stop, n_total),
         "gap_through_target_rate": _rate(n_gap_target, n_total),
+        "expectancy_R": mean_R_primary,
         "mean_R_primary": mean_R_primary,
         "mean_R_conservative": mean_R_conservative,
         "mean_R_optimistic": mean_R_optimistic,
+        "median_R": median_R_primary,
         "median_R_primary": median_R_primary,
+        "total_R": total_R,
+        "expectancy_R_ci_low": expectancy_ci_lo,
+        "expectancy_R_ci_high": expectancy_ci_hi,
+        "win_rate_ci_low": wr_lo,
+        "win_rate_ci_high": wr_hi,
         "mean_MAE": _mean(primary_set["mae_R"]),
         "mean_MFE": _mean(primary_set["mfe_R"]),
         "mean_bars": _mean(primary_set["bars_to_resolve"].astype(float)),
@@ -119,16 +181,25 @@ def _empty_stats() -> dict:
     return {
         "n_total": 0, "n_primary": 0,
         "n_win": 0, "n_loss": 0, "n_ambiguous": 0, "n_timeout": 0, "n_scoreable": 0,
+        "resolved_n": 0,
         "primary_2R_pct": float("nan"),
         "conservative_2R_pct": float("nan"),
         "optimistic_2R_pct": float("nan"),
         "ambiguous_rate": float("nan"),
+        "gap_rate": float("nan"),
         "gap_through_stop_rate": float("nan"),
         "gap_through_target_rate": float("nan"),
+        "expectancy_R": float("nan"),
         "mean_R_primary": float("nan"),
         "mean_R_conservative": float("nan"),
         "mean_R_optimistic": float("nan"),
+        "median_R": float("nan"),
         "median_R_primary": float("nan"),
+        "total_R": 0.0,
+        "expectancy_R_ci_low": float("nan"),
+        "expectancy_R_ci_high": float("nan"),
+        "win_rate_ci_low": float("nan"),
+        "win_rate_ci_high": float("nan"),
         "mean_MAE": float("nan"),
         "mean_MFE": float("nan"),
         "mean_bars": float("nan"),
@@ -137,12 +208,13 @@ def _empty_stats() -> dict:
     }
 
 
-def build_stats(occ: pd.DataFrame, cells: list[Cell]) -> pd.DataFrame:
-    """One row per cell with all metrics + lift_vs_parent."""
+def build_stats(occ: pd.DataFrame, cells: list[Cell], *,
+                run_id: str = "unknown") -> pd.DataFrame:
+    """One row per cell with all metrics + lift_vs_parent + bootstrap CIs."""
     stats: dict[str, dict] = {}
     for cell in cells:
         sub = _apply_cell(occ, cell)
-        s = _stats_for(sub)
+        s = _stats_for(sub, run_id=run_id, cell_name=cell.name)
         stats[cell.name] = s
 
     rows = []
@@ -150,6 +222,8 @@ def build_stats(occ: pd.DataFrame, cells: list[Cell]) -> pd.DataFrame:
         s = dict(stats[cell.name])
         s["cell"] = cell.name
         s["parent"] = cell.parent or "-"
+        s["redundant_by_construction"] = bool(cell.redundant_by_construction)
+        s["families"] = ",".join(cell.families) if cell.families else ""
         if cell.parent and cell.parent in stats:
             ps = stats[cell.parent]
             if _finite(s["primary_2R_pct"]) and _finite(ps["primary_2R_pct"]):
@@ -162,19 +236,21 @@ def build_stats(occ: pd.DataFrame, cells: list[Cell]) -> pd.DataFrame:
         rows.append(s)
 
     col_order = [
-        "cell", "parent", "n_total", "n_primary",
-        "n_win", "n_loss", "n_ambiguous", "n_timeout", "n_scoreable",
+        "cell", "parent", "families", "redundant_by_construction",
+        "n_total", "n_primary",
+        "n_win", "n_loss", "n_ambiguous", "n_timeout", "n_scoreable", "resolved_n",
         "primary_2R_pct", "conservative_2R_pct", "optimistic_2R_pct",
-        "ambiguous_rate",
+        "win_rate_ci_low", "win_rate_ci_high",
+        "ambiguous_rate", "gap_rate",
         "gap_through_stop_rate", "gap_through_target_rate",
+        "expectancy_R", "expectancy_R_ci_low", "expectancy_R_ci_high",
         "mean_R_primary", "mean_R_conservative", "mean_R_optimistic",
-        "median_R_primary",
+        "median_R", "median_R_primary", "total_R",
         "mean_MAE", "mean_MFE", "mean_bars",
         "lift_vs_parent_pct", "warn_low_n",
         "regime_l2_split", "regime_coarse_split",
     ]
     df = pd.DataFrame(rows)
-    # JSON-encode the split dicts so CSV export is clean
     df["regime_l2_split"] = df["regime_l2_split"].apply(json.dumps)
     df["regime_coarse_split"] = df["regime_coarse_split"].apply(json.dumps)
     return df[col_order]
@@ -203,6 +279,13 @@ def _stats_to_md(name: str, stats: pd.DataFrame, manifest: dict) -> str:
     lines = [
         f"# {name} — research results (preregistration {manifest.get('preregistration_version','?')})",
         "",
+        f"- git_commit: `{manifest.get('git_commit', 'unknown')}`",
+        f"- run_id: `{manifest.get('run_id', 'unknown')}`",
+        f"- detector_version: {manifest.get('detector_version', '?')}",
+        f"- resolver_version: {manifest.get('resolver_version', '?')}",
+        f"- feature_versions: {json.dumps(manifest.get('feature_versions', {}))}",
+        f"- dataset_hash: `{manifest.get('dataset_hash', '?')[:16]}…`",
+        f"- config_hash:  `{manifest.get('config_hash', '?')[:16]}…`",
         f"- Symbols requested: {manifest.get('n_symbols_requested', 0)}",
         f"- Symbols with data: {manifest.get('n_symbols_ok', 0)}",
         f"- Occurrences: {manifest.get('n_occurrences', 0)}",

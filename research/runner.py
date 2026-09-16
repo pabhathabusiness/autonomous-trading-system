@@ -16,19 +16,48 @@ No I/O. Caller writes the DataFrame via report.write_results.
 
 from __future__ import annotations
 
+import hashlib
 import logging
-from datetime import date
+import subprocess
+import uuid
+from datetime import date, datetime, timezone
 from typing import Iterable
 
 import pandas as pd
 
 from . import regime as regime_mod
+from . import versioning as V
 from .data import BarSource
 from .detectors._base import Detector
 from .resolve import Resolution, resolve
 
 
 logger = logging.getLogger(__name__)
+
+
+def _git_commit() -> str:
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL,
+        ).decode().strip()
+        return out
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def _dataset_hash(rows: list[dict]) -> str:
+    """sha256 of per-symbol OHLC digests (symbol + t0 + entry + stop + target)."""
+    h = hashlib.sha256()
+    for r in rows:
+        h.update(f"{r.get('symbol')}|{r.get('t0')}|{r.get('entry')}|{r.get('stop')}|{r.get('target')}\n".encode())
+    return h.hexdigest()
+
+
+def _config_hash(config: dict) -> str:
+    """Deterministic hash of preregistered thresholds + run config."""
+    items = sorted(config.items())
+    payload = "\n".join(f"{k}={v}" for k, v in items).encode()
+    return hashlib.sha256(payload).hexdigest()
 
 
 def run_detector(
@@ -41,12 +70,21 @@ def run_detector(
     spy_source: BarSource | None = None,
     max_bars_per_symbol: int = 1500,
 ) -> tuple[pd.DataFrame, dict]:
+    run_id = str(uuid.uuid4())
+    run_ts = datetime.now(timezone.utc).isoformat()
     manifest = {
-        "preregistration_version": "v0.2",
+        "git_commit": _git_commit(),
+        "preregistration_version": V.PREREGISTRATION_VERSION,
         "detector": detector.name,
+        "detector_version": V.DETECTOR_VERSIONS.get(detector.name, "unknown"),
+        "resolver_version": V.RESOLVER_VERSION,
+        "feature_versions": dict(V.FEATURE_VERSIONS),
+        "run_id": run_id,
+        "run_timestamp": run_ts,
         "start": start.isoformat(),
         "end": end.isoformat(),
         "max_bars_to_resolve": max_bars,
+        "max_bars_per_symbol": max_bars_per_symbol,
         "n_symbols_requested": 0,
         "n_symbols_ok": 0,
         "drop_reasons": {},
@@ -121,4 +159,13 @@ def run_detector(
 
     manifest["n_symbols_requested"] = seen
     manifest["n_occurrences"] = len(rows)
+    manifest["dataset_hash"] = _dataset_hash(rows)
+    manifest["config_hash"] = _config_hash({
+        "detector": detector.name,
+        "max_bars": max_bars,
+        "max_bars_per_symbol": max_bars_per_symbol,
+        "preregistration_version": V.PREREGISTRATION_VERSION,
+        "resolver_version": V.RESOLVER_VERSION,
+        "feature_versions": tuple(sorted(V.FEATURE_VERSIONS.items())),
+    })
     return pd.DataFrame(rows), manifest

@@ -119,7 +119,10 @@ def _risk_state(df: pd.DataFrame) -> Risk:
 # --------------------------------------------------------------------- API
 def semantic_regime_at(spy_df: pd.DataFrame, timestamp: pd.Timestamp) -> SemanticRegime:
     """Full Layer-2 state at (or immediately before) `timestamp`. If SPY doesn't
-    have that exact timestamp, uses the most recent SPY bar ≤ timestamp."""
+    have that exact timestamp, uses the most recent SPY bar ≤ timestamp.
+
+    Consults ONLY SPY bars with index ≤ timestamp (historical reconstruction).
+    """
     if spy_df is None or spy_df.empty:
         return SemanticRegime("UNKNOWN", "UNKNOWN")
     idx = spy_df.index.searchsorted(timestamp, side="right") - 1
@@ -129,6 +132,54 @@ def semantic_regime_at(spy_df: pd.DataFrame, timestamp: pd.Timestamp) -> Semanti
     trend = _trend_state(slice_["close"])
     risk = _risk_state(slice_)
     return SemanticRegime(trend, risk)
+
+
+def _confidence(trend: Trend, risk: Risk) -> str:
+    """Deterministic confidence tag per PREREGISTRATION.md § 3.
+      - "high"   : trend ∈ {STRONG_UPTREND, STRONG_DOWNTREND} AND risk aligns
+      - "medium" : neither UNKNOWN, no conflict, but not strong
+      - "low"    : conflict OR either component is UNKNOWN
+    """
+    if trend == "UNKNOWN" or risk == "UNKNOWN":
+        return "low"
+    strong = trend in ("STRONG_UPTREND", "STRONG_DOWNTREND")
+    aligned_up = trend in ("STRONG_UPTREND", "UPTREND") and risk in ("RISK_ON", "RISK_NEUTRAL")
+    aligned_dn = trend in ("STRONG_DOWNTREND", "DOWNTREND") and risk in ("RISK_OFF", "RISK_NEUTRAL")
+    conflict = (trend in ("UPTREND", "STRONG_UPTREND") and risk == "RISK_OFF") or \
+               (trend in ("DOWNTREND", "STRONG_DOWNTREND") and risk == "RISK_ON")
+    if strong and (aligned_up or aligned_dn):
+        return "high"
+    if not conflict and (aligned_up or aligned_dn or trend == "SIDEWAYS"):
+        return "medium"
+    return "low"
+
+
+def market_context_at(spy_df: pd.DataFrame, timestamp: pd.Timestamp) -> dict:
+    """Namespaced market context (`market.*`) at `timestamp`, including
+    exposed components and confidence."""
+    sr = semantic_regime_at(spy_df, timestamp)
+    coarse = sr.coarse
+    conflict = (coarse == "CHOP")
+    confidence = _confidence(sr.trend, sr.risk)
+    known_at = None
+    if spy_df is not None and not spy_df.empty:
+        idx = spy_df.index.searchsorted(timestamp, side="right") - 1
+        if idx >= 0:
+            known_at = spy_df.index[idx].isoformat()
+    return {
+        "market._feature_version": "v0.3.0",
+        "market._source_timeframe": "1d",
+        "market._known_at": known_at,
+        "market.spy_regime_semantic": sr.label,
+        "market.spy_regime_coarse": coarse,
+        "market.spy_trend_component": sr.trend,
+        "market.spy_risk_component": sr.risk,
+        "market.spy_regime_conflict": bool(conflict),
+        "market.spy_regime_confidence": confidence,
+        "market.spy_regime_availability": bool(
+            sr.trend != "UNKNOWN" and sr.risk != "UNKNOWN"
+        ),
+    }
 
 
 def semantic_regime_series(spy_df: pd.DataFrame) -> pd.Series:
